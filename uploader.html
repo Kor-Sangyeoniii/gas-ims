@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GAS-IMS 자동 배포</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', sans-serif;
+    background: #0d1117;
+    color: #e6edf3;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  .card {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 12px;
+    padding: 36px;
+    width: 100%;
+    max-width: 480px;
+  }
+  h1 {
+    font-size: 20px;
+    font-weight: 700;
+    margin-bottom: 6px;
+    color: #58a6ff;
+  }
+  .sub {
+    font-size: 13px;
+    color: #8b949e;
+    margin-bottom: 28px;
+  }
+  label {
+    font-size: 12px;
+    font-weight: 600;
+    color: #8b949e;
+    display: block;
+    margin-bottom: 6px;
+  }
+  input[type="password"], input[type="text"] {
+    width: 100%;
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    color: #e6edf3;
+    padding: 10px 12px;
+    font-size: 13px;
+    margin-bottom: 16px;
+    outline: none;
+    transition: border 0.2s;
+  }
+  input:focus { border-color: #58a6ff; }
+
+  .drop-zone {
+    border: 2px dashed #30363d;
+    border-radius: 8px;
+    padding: 36px 20px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.2s;
+    margin-bottom: 20px;
+    background: #0d1117;
+  }
+  .drop-zone.drag-over {
+    border-color: #58a6ff;
+    background: #1c2d3f;
+  }
+  .drop-zone.has-file {
+    border-color: #3fb950;
+    background: #0d2219;
+  }
+  .drop-icon { font-size: 32px; margin-bottom: 10px; }
+  .drop-text { font-size: 13px; color: #8b949e; }
+  .drop-filename { font-size: 14px; font-weight: 600; color: #3fb950; margin-top: 8px; }
+
+  .btn {
+    width: 100%;
+    padding: 12px;
+    border: none;
+    border-radius: 8px;
+    font-size: 15px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .btn-primary {
+    background: #238636;
+    color: #fff;
+  }
+  .btn-primary:hover:not(:disabled) { background: #2ea043; }
+  .btn-primary:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
+
+  .status {
+    margin-top: 16px;
+    padding: 12px 16px;
+    border-radius: 8px;
+    font-size: 13px;
+    display: none;
+  }
+  .status.info { background: #1c2d3f; border: 1px solid #58a6ff; color: #58a6ff; }
+  .status.success { background: #0d2219; border: 1px solid #3fb950; color: #3fb950; }
+  .status.error { background: #2d1219; border: 1px solid #f85149; color: #f85149; }
+
+  .progress-bar {
+    height: 4px;
+    background: #21262d;
+    border-radius: 2px;
+    margin-top: 12px;
+    overflow: hidden;
+    display: none;
+  }
+  .progress-fill {
+    height: 100%;
+    background: #58a6ff;
+    border-radius: 2px;
+    transition: width 0.3s;
+    width: 0%;
+  }
+
+  .save-token {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 16px;
+    font-size: 12px;
+    color: #8b949e;
+    cursor: pointer;
+  }
+  .save-token input { width: auto; margin: 0; }
+
+  .token-hint {
+    font-size: 11px;
+    color: #484f58;
+    margin-top: -12px;
+    margin-bottom: 16px;
+  }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>🚀 GAS-IMS 자동 배포</h1>
+  <p class="sub">index.html을 GitHub에 자동으로 업로드합니다</p>
+
+  <label>GitHub Personal Access Token</label>
+  <input type="password" id="tokenInput" placeholder="ghp_xxxxxxxxxxxx" />
+  <p class="token-hint">※ 토큰은 이 기기에만 저장됩니다 (선택사항)</p>
+  <label class="save-token">
+    <input type="checkbox" id="saveToken"> 이 기기에 토큰 저장 (다음에 자동 입력)
+  </label>
+
+  <label>업로드할 파일</label>
+  <div class="drop-zone" id="dropZone">
+    <div class="drop-icon">📄</div>
+    <div class="drop-text">index.html을 여기에 드래그하거나<br>클릭해서 선택하세요</div>
+    <div class="drop-filename" id="fileName"></div>
+  </div>
+  <input type="file" id="fileInput" accept=".html" style="display:none">
+
+  <button class="btn btn-primary" id="uploadBtn" disabled onclick="upload()">
+    📤 GitHub에 업로드
+  </button>
+
+  <div class="progress-bar" id="progressBar">
+    <div class="progress-fill" id="progressFill"></div>
+  </div>
+
+  <div class="status" id="status"></div>
+</div>
+
+<script>
+  const REPO   = 'Kor-Sangyeoniii/gas-ims';
+  const BRANCH = 'main';
+  const FILE   = 'index.html';
+
+  let fileContent = null;
+
+  // 저장된 토큰 불러오기
+  const savedToken = localStorage.getItem('gasims_gh_token');
+  if (savedToken) {
+    document.getElementById('tokenInput').value = savedToken;
+    document.getElementById('saveToken').checked = true;
+  }
+
+  // 드래그앤드롭
+  const dropZone = document.getElementById('dropZone');
+  const fileInput = document.getElementById('fileInput');
+
+  dropZone.addEventListener('click', () => fileInput.click());
+  dropZone.addEventListener('dragover', e => {
+    e.preventDefault();
+    dropZone.classList.add('drag-over');
+  });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault();
+    dropZone.classList.remove('drag-over');
+    const file = e.dataTransfer.files[0];
+    if (file) readFile(file);
+  });
+  fileInput.addEventListener('change', e => {
+    if (e.target.files[0]) readFile(e.target.files[0]);
+  });
+
+  function readFile(file) {
+    if (!file.name.endsWith('.html')) {
+      showStatus('error', '❌ HTML 파일만 업로드 가능합니다');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = e => {
+      fileContent = btoa(unescape(encodeURIComponent(e.target.result)));
+      document.getElementById('fileName').textContent = `✅ ${file.name} (${(file.size/1024).toFixed(1)}KB)`;
+      dropZone.classList.add('has-file');
+      checkReady();
+    };
+    reader.readAsText(file, 'UTF-8');
+  }
+
+  document.getElementById('tokenInput').addEventListener('input', checkReady);
+
+  function checkReady() {
+    const token = document.getElementById('tokenInput').value.trim();
+    document.getElementById('uploadBtn').disabled = !(token && fileContent);
+  }
+
+  function showStatus(type, msg) {
+    const el = document.getElementById('status');
+    el.className = `status ${type}`;
+    el.textContent = msg;
+    el.style.display = 'block';
+  }
+
+  function setProgress(pct) {
+    const bar = document.getElementById('progressBar');
+    const fill = document.getElementById('progressFill');
+    bar.style.display = 'block';
+    fill.style.width = pct + '%';
+  }
+
+  async function upload() {
+    const token = document.getElementById('tokenInput').value.trim();
+    const btn = document.getElementById('uploadBtn');
+
+    // 토큰 저장 여부
+    if (document.getElementById('saveToken').checked) {
+      localStorage.setItem('gasims_gh_token', token);
+    } else {
+      localStorage.removeItem('gasims_gh_token');
+    }
+
+    btn.disabled = true;
+    btn.textContent = '⏳ 업로드 중...';
+    showStatus('info', '🔄 GitHub에 연결 중...');
+    setProgress(20);
+
+    const apiUrl = `https://api.github.com/repos/${REPO}/contents/${FILE}`;
+    const headers = {
+      'Authorization': `token ${token}`,
+      'Content-Type': 'application/json',
+      'Accept': 'application/vnd.github.v3+json'
+    };
+
+    try {
+      // 현재 파일 SHA 가져오기 (업데이트에 필요)
+      showStatus('info', '🔄 현재 파일 정보 확인 중...');
+      setProgress(40);
+
+      const getRes = await fetch(apiUrl, { headers });
+      let sha = null;
+      if (getRes.ok) {
+        const data = await getRes.json();
+        sha = data.sha;
+      }
+
+      setProgress(60);
+      showStatus('info', '🔄 파일 업로드 중...');
+
+      // 업로드
+      const now = new Date().toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' });
+      const body = {
+        message: `🚀 자동 업데이트 (${now})`,
+        content: fileContent,
+        branch: BRANCH
+      };
+      if (sha) body.sha = sha;
+
+      const putRes = await fetch(apiUrl, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify(body)
+      });
+
+      setProgress(90);
+
+      if (!putRes.ok) {
+        const err = await putRes.json();
+        throw new Error(err.message || '업로드 실패');
+      }
+
+      setProgress(100);
+      showStatus('success',
+        '✅ 업로드 완료! GitHub Pages에 1~2분 내로 자동 반영됩니다.\n\n' +
+        '🌐 https://Kor-Sangyeoniii.github.io/gas-ims/'
+      );
+      btn.textContent = '✅ 업로드 완료';
+
+    } catch(e) {
+      showStatus('error', `❌ 오류: ${e.message}\n\nToken 확인 후 다시 시도해 주세요.`);
+      btn.disabled = false;
+      btn.textContent = '📤 GitHub에 업로드';
+      setProgress(0);
+    }
+  }
+</script>
+</body>
+</html>
