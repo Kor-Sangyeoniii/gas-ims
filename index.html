@@ -3,6 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <title>가스 재고관리 시스템</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Nanum+Gothic:wght@400;700;800&family=JetBrains+Mono:wght@400;600&display=swap');
@@ -148,7 +151,7 @@
 <!-- Firebase SDK -->
 <script type="module">
 import { initializeApp }                        from 'https://www.gstatic.com/firebasejs/12.11.0/firebase-app.js';
-import { getFirestore, doc, collection,
+import { initializeFirestore, doc, collection,
          getDoc, getDocs, setDoc, onSnapshot,
          enableIndexedDbPersistence }           from 'https://www.gstatic.com/firebasejs/12.11.0/firebase-firestore.js';
 
@@ -162,7 +165,11 @@ const firebaseConfig = {
 };
 
 const fbApp = initializeApp(firebaseConfig);
-const db    = getFirestore(fbApp);
+// WebSocket 차단 환경(회사 방화벽 등) 대비 → HTTP 롱폴링 강제 사용
+const db = initializeFirestore(fbApp, {
+  experimentalForceLongPolling: true,
+  useFetchStreams: false,
+});
 
 // 오프라인 지원 (IndexedDB 캐싱)
 enableIndexedDbPersistence(db).catch(err => {
@@ -232,8 +239,25 @@ console.log('✅ Firebase 초기화 완료');
       <div style="font-size:12px;color:var(--text3);margin-top:4px">생산관리 시스템</div>
     </div>
 
+    <!-- 계정 선택 화면 (첫 화면) -->
+    <div id="authSelect" style="display:none">
+      <div style="font-size:15px;font-weight:600;color:var(--text1);text-align:center;margin-bottom:20px">계정이 있으신가요?</div>
+      <div style="display:flex;flex-direction:column;gap:12px">
+        <button class="btn btn-primary" onclick="showAuthLogin()" style="width:100%;padding:12px;font-size:14px;font-weight:700">
+          ✅ 네, 로그인할게요
+        </button>
+        <button class="btn" onclick="showAuthSignup()" style="width:100%;padding:12px;font-size:14px;font-weight:700;background:var(--bg3);border:1px solid var(--border);color:var(--text2)">
+          🆕 아니요, 계정을 만들게요
+        </button>
+      </div>
+    </div>
+
     <!-- 최초 관리자 등록 화면 -->
     <div id="authSignup" style="display:none">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px">
+        <button onclick="showAuthSelect()" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:18px;padding:0">←</button>
+        <div style="font-size:14px;font-weight:600;color:var(--text2)">계정 등록</div>
+      </div>
       <div style="background:rgba(56,139,253,.1);border:1px solid var(--accent2);border-radius:8px;padding:12px;margin-bottom:16px;font-size:12px;color:var(--text2);line-height:1.5">
         💡 <strong>최초 관리자 계정 등록</strong><br>
         시스템의 최고 관리자 계정을 등록해주세요. 이 계정으로 다른 사용자를 추가할 수 있습니다.
@@ -261,6 +285,10 @@ console.log('✅ Firebase 초기화 완료');
 
     <!-- 로그인 화면 -->
     <div id="authLogin" style="display:none">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px">
+        <button onclick="showAuthSelect()" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:18px;padding:0">←</button>
+        <div style="font-size:14px;font-weight:600;color:var(--text2)">로그인</div>
+      </div>
       <div class="field" style="margin-bottom:12px">
         <label>아이디</label>
         <input type="text" id="loginId" placeholder="아이디" style="width:100%" autocomplete="off">
@@ -1936,6 +1964,7 @@ console.log('✅ Firebase 초기화 완료');
 
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         <button class="btn btn-success" onclick="setupCertFolder()">📂 저장 폴더 선택</button>
+        <button class="btn" style="background:var(--bg3);border:1px solid var(--border);color:var(--teal)" id="openFolderBtn" onclick="openCertFolder()" disabled>📁 폴더 열기</button>
         <button class="btn" style="background:var(--bg3);border:1px solid var(--border);color:var(--text2)" onclick="testCertFolder()">🧪 권한 테스트</button>
         <button class="btn btn-danger" onclick="clearCertFolderSetting()">🗑️ 설정 해제</button>
       </div>
@@ -2708,6 +2737,7 @@ async function initAuth() {
 
   // 2) 인증 오버레이 표시, 로딩 메시지부터
   document.getElementById('authOverlay').style.display = 'flex';
+  document.getElementById('authSelect').style.display = 'none';
   document.getElementById('authSignup').style.display = 'none';
   document.getElementById('authLogin').style.display = 'none';
 
@@ -2798,14 +2828,31 @@ async function initAuth() {
 
   // 6) 인증 화면 표시
   if (!users.length) {
-    document.getElementById('authSignup').style.display = 'block';
-    document.getElementById('authLogin').style.display = 'none';
-    setTimeout(() => document.getElementById('signupId')?.focus(), 100);
+    // 사용자 없으면 바로 가입 화면
+    showAuthSignup();
   } else {
-    document.getElementById('authSignup').style.display = 'none';
-    document.getElementById('authLogin').style.display = 'block';
-    setTimeout(() => document.getElementById('loginId')?.focus(), 100);
+    // 사용자 있으면 선택 화면
+    showAuthSelect();
   }
+}
+
+// 화면 전환 헬퍼
+function showAuthSelect() {
+  document.getElementById('authSelect').style.display = 'block';
+  document.getElementById('authLogin').style.display = 'none';
+  document.getElementById('authSignup').style.display = 'none';
+}
+function showAuthLogin() {
+  document.getElementById('authSelect').style.display = 'none';
+  document.getElementById('authSignup').style.display = 'none';
+  document.getElementById('authLogin').style.display = 'block';
+  setTimeout(() => document.getElementById('loginId')?.focus(), 100);
+}
+function showAuthSignup() {
+  document.getElementById('authSelect').style.display = 'none';
+  document.getElementById('authLogin').style.display = 'none';
+  document.getElementById('authSignup').style.display = 'block';
+  setTimeout(() => document.getElementById('signupId')?.focus(), 100);
 }
 
 function startApp() {
@@ -2816,6 +2863,43 @@ function startApp() {
 
 // 앱 시작 — 인증부터
 setTimeout(initAuth, 0);
+
+// ── 항상 최신버전 유지 (GitHub Pages 캐시 우회)
+(function() {
+  const VERSION_KEY = 'gasims_version';
+  const CHECK_INTERVAL = 5 * 60 * 1000; // 5분마다 체크
+
+  async function checkUpdate() {
+    try {
+      const res = await fetch(location.href + '?v=' + Date.now(), {
+        method: 'HEAD', cache: 'no-store'
+      });
+      const lastModified = res.headers.get('last-modified');
+      if (!lastModified) return;
+      const saved = localStorage.getItem(VERSION_KEY);
+      if (!saved) {
+        localStorage.setItem(VERSION_KEY, lastModified);
+        return;
+      }
+      if (saved !== lastModified) {
+        localStorage.setItem(VERSION_KEY, lastModified);
+        console.log('[업데이트] 새 버전 감지');
+        // 입력 중 데이터 날아가지 않도록 확인창 표시
+        const ok = confirm(
+          '🔄 새 버전이 업데이트됐습니다!\n\n' +
+          '지금 새로고침하면 최신 버전으로 전환됩니다.\n' +
+          '(입력 중인 내용이 있으면 저장 후 확인하세요)\n\n' +
+          '지금 업데이트하시겠습니까?'
+        );
+        if (ok) location.reload(true);
+      }
+    } catch(e) {}
+  }
+
+  // 첫 로드 시 + 이후 5분마다 체크
+  setTimeout(checkUpdate, 3000);
+  setInterval(checkUpdate, CHECK_INTERVAL);
+})();
 
 // ══════ MIX GAS BUILDER ══════
 function isLiquidGas(g) {
@@ -8686,11 +8770,12 @@ async function generateCertExcel(entry, company, issueDate, selectedCyls, valveT
       cells[`A${rowNum}`] = { t:'s', v: addShared(item.name || '') };
 
       if (rowNum === 21) {
-        // Row 21 — 주성분 (양식이 0.000% 포맷이라 /100 처리, 자릿수는 양식이 결정)
+        // Row 21 — 주성분 (텍스트로 직접 "99.999 %" 형식으로 입력)
         if (specStr) {
           const specNum = parseFloat(specStr);
           if (!isNaN(specNum)) {
-            cells['M21'] = { t:'n', v: isPercent ? specNum / 100 : specNum };
+            const fixed = formatMin1Decimal(specNum);
+            cells['M21'] = { t:'s', v: addShared(isPercent ? `${fixed} %` : fixed) };
           } else {
             cells['M21'] = { t:'s', v: addShared(specStr) };
           }
@@ -8698,7 +8783,8 @@ async function generateCertExcel(entry, company, issueDate, selectedCyls, valveT
         if (valStr) {
           const num = parseFloat(valStr);
           if (!isNaN(num)) {
-            cells['Y21'] = { t:'n', v: isPercent ? num / 100 : num };
+            const fixed = formatMin1Decimal(num);
+            cells['Y21'] = { t:'s', v: addShared(isPercent ? `${fixed} %` : fixed) };
           } else {
             cells['Y21'] = { t:'s', v: addShared(valStr) };
           }
@@ -8823,24 +8909,18 @@ async function generateCertExcel(entry, company, issueDate, selectedCyls, valveT
       drawingXml = drawingXml.replace(/<xdr:oneCellAnchor>(?:(?!<\/xdr:oneCellAnchor>)[\s\S])*?name="Signature"[\s\S]*?<\/xdr:oneCellAnchor>/g, '');
       drawingXml = drawingXml.replace(/<xdr:twoCellAnchor[^>]*>(?:(?!<\/xdr:twoCellAnchor>)[\s\S])*?name="Signature"[\s\S]*?<\/xdr:twoCellAnchor>/g, '');
 
-      // 서명 위치: 분석자 이름 바로 옆 (P41 또는 P39 옆 → Q열 시작)
-      // PURE: P41 → row=40 (0-indexed), MIX: P39 → row=38
-      // 셀 좌표: 0-indexed col, row
-      const sigRowZ = isMix ? 38 : 40;          // 분석자 이름 행 (0-indexed)
-      const sigColZ = 16;                        // Q열 (A=0, B=1, ... P=15, Q=16)
-
-      // EMU 단위 (1cm ≈ 360000 EMU)
-      // 도장 크기: 약 1.6cm × 1.6cm
-      const sigW = 580000;
-      const sigH = 580000;
-      // 셀 안에서 위/왼쪽 offset
-      const offsetX = 30000;   // 살짝 오른쪽
-      const offsetY = -50000;  // 약간 위로 (가운데 정렬)
+      // 서명 위치: 분석자 이름(P열) 기준으로 동적 계산
+      // analystRow: PURE=41, MIX=39 → 0-indexed: PURE=40, MIX=38
+      // P열 = 15 (0-indexed), 서명은 Q열(16)부터 시작
+      const sigFromRow = analystRow - 1;   // 0-indexed (PURE=40, MIX=38)
+      const sigFromCol = 16;               // Q열 (P열 바로 오른쪽)
+      const sigToCol   = 30;               // AE열까지
+      const sigToRow   = sigFromRow + 2;   // 2행 아래까지
 
       const sigUid = Date.now();
-      const newAnchor = `<xdr:oneCellAnchor>
-<xdr:from><xdr:col>${sigColZ}</xdr:col><xdr:colOff>${offsetX}</xdr:colOff><xdr:row>${sigRowZ}</xdr:row><xdr:rowOff>${offsetY}</xdr:rowOff></xdr:from>
-<xdr:ext cx="${sigW}" cy="${sigH}"/>
+      const newAnchor = `<xdr:twoCellAnchor editAs="oneCell">
+<xdr:from><xdr:col>${sigFromCol}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${sigFromRow}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+<xdr:to><xdr:col>${sigToCol}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${sigToRow}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
 <xdr:pic>
 <xdr:nvPicPr>
 <xdr:cNvPr id="${sigUid}" name="Signature"/>
@@ -8855,7 +8935,7 @@ async function generateCertExcel(entry, company, issueDate, selectedCyls, valveT
 </xdr:spPr>
 </xdr:pic>
 <xdr:clientData/>
-</xdr:oneCellAnchor>`;
+</xdr:twoCellAnchor>`;
 
       // </xdr:wsDr> 직전에 삽입
       drawingXml = drawingXml.replace('</xdr:wsDr>', newAnchor + '</xdr:wsDr>');
@@ -9783,6 +9863,7 @@ function exportClosingCsv() {
 
 async function refreshCertFolderStatus() {
   const el = document.getElementById('certFolderStatus');
+  const openBtn = document.getElementById('openFolderBtn');
   if (!el) return;
 
   if (!window.showDirectoryPicker) {
@@ -9793,6 +9874,7 @@ async function refreshCertFolderStatus() {
   const handle = await loadCertFolderHandle();
   if (!handle) {
     el.innerHTML = '<span style="color:var(--text3)">📭 저장 폴더가 설정되지 않았습니다 (성적서는 기본 다운로드 폴더로 저장됩니다)</span>';
+    if (openBtn) openBtn.disabled = true;
     return;
   }
 
@@ -9811,6 +9893,30 @@ async function refreshCertFolderStatus() {
     <div style="margin-top:4px;font-size:11px">상태: ${permLabel}</div>
     ${permState !== 'granted' ? '<div style="margin-top:4px;font-size:11px;color:var(--text3)">→ 다음 성적서 발행 시 권한 요청 팝업이 나타납니다</div>' : ''}
   `;
+
+  // 폴더 열기 버튼 활성화
+  if (openBtn) openBtn.disabled = false;
+  window._certFolderHandle = handle;
+}
+
+// 폴더 열기 (파일 탐색기)
+async function openCertFolder() {
+  const handle = window._certFolderHandle || await loadCertFolderHandle();
+  if (!handle) { alert('저장 폴더가 설정되지 않았습니다.'); return; }
+  try {
+    // File System Access API로 폴더 직접 열기
+    await handle.requestPermission({ mode: 'read' });
+    // 브라우저 보안상 직접 탐색기를 열 수는 없어서
+    // 폴더명을 클립보드에 복사하고 안내 메시지 표시
+    await navigator.clipboard.writeText(handle.name);
+    alert(
+      `📁 저장 폴더: ${handle.name}\n\n` +
+      `폴더명이 클립보드에 복사됐습니다.\n` +
+      `파일 탐색기(Win+E) → 주소창에 붙여넣기(Ctrl+V) → Enter`
+    );
+  } catch(e) {
+    alert(`📁 저장 폴더: ${handle.name}\n\n파일 탐색기(Win+E)에서 직접 이동해주세요.`);
+  }
 }
 
 async function setupCertFolder() {
