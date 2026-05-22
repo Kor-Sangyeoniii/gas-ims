@@ -2976,7 +2976,34 @@ function showAuthSignup() {
 function startApp() {
   showUserBadge();
   applyRolePermissions();
+  migrateAnalysisData();
   initApp();
+}
+
+// 기존 analysisData에서 value가 0이거나 빈 항목 정리 (1회성 마이그레이션)
+function migrateAnalysisData() {
+  let changed = false;
+  analysisData = analysisData.map(entry => {
+    if (!entry.items || !entry.items.length) return entry;
+    const cleanedItems = entry.items.filter(i => {
+      if (!i.name) return false;
+      const v = String(i.value || '').trim();
+      if (v === '') return false;
+      if (v.toLowerCase() === 'balance') return true; // balance는 유지
+      const num = parseFloat(v);
+      if (!isNaN(num) && num === 0) return false; // 0이면 제거
+      return true;
+    });
+    if (cleanedItems.length !== entry.items.length) {
+      changed = true;
+      return { ...entry, items: cleanedItems };
+    }
+    return entry;
+  });
+  if (changed) {
+    save(STORE_KEY_ANALYSIS, analysisData);
+    console.log('[마이그레이션] 분석치 0% 항목 정리 완료');
+  }
 }
 
 // 앱 시작 — 인증부터
@@ -9114,12 +9141,6 @@ async function generateCertExcel(entry, company, issueDate, selectedCyls, valveT
           }
         }
         // Y열(분석치)은 빈칸으로 두고 직접 기입
-              cells[`Y${r}`] = { t:'s', v: addShared(fixed) };
-            }
-          } else {
-            cells[`Y${r}`] = { t:'s', v: addShared(valStr) };
-          }
-        }
       }
 
       // Remark ±5% (% 단위만)
