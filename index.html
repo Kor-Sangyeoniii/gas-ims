@@ -5081,8 +5081,9 @@ function syncTxnFilters() {
   document.getElementById('txnSize').innerHTML = '<option value="">선택</option>' + sizes.map(s=>`<option ${s===size?'selected':''}>${s}</option>`).join('');
 
   const matches2 = inventory.filter(r => (!gas || r.gas === gas) && (!size || r.size === size));
-  const cos = [...new Set(matches2.map(r => r.company))];
-  document.getElementById('txnComp').innerHTML = '<option value="">선택</option>' + cos.map(c=>`<option>${c}</option>`).join('');
+  const invCos = [...new Set(matches2.map(r => r.company).filter(Boolean))];
+  const allCos = [...new Set([...invCos, ...(clients||[])])].sort();
+  document.getElementById('txnComp').innerHTML = '<option value="">선택</option>' + allCos.map(c=>`<option>${c}</option>`).join('');
 
   // 출고 모드에서는 LOT 목록도 업데이트
   if (curTxnType === 'ship') populateTxnLots();
@@ -8185,7 +8186,7 @@ function saveAnalysis() {
 
   if (!analysisDate) { alert('분석일자를 입력해주세요.'); return; }
 
-  // LOT 대표 분석 항목
+  // LOT 대표 분석 항목 — value가 0이거나 빈 항목 자동 제거
   const items = [...document.querySelectorAll('#anItemBody tr')].map(tr => ({
     name:  tr.querySelector('.an-name')?.value.trim()  || '',
     value: tr.querySelector('.an-value')?.value.trim() || '',
@@ -8193,7 +8194,7 @@ function saveAnalysis() {
     spec:  tr.querySelector('.an-spec')?.value.trim()  || '',
     pass:  tr.querySelector('.an-pass')?.textContent==='PASS' ? true
          : tr.querySelector('.an-pass')?.textContent==='FAIL' ? false : null
-  })).filter(i => i.name);
+  })).filter(i => i.name && parseFloat(i.value) !== 0 && i.value !== '');
 
   if (!items.length) { alert('분석 항목을 1개 이상 입력해주세요.'); return; }
 
@@ -9095,14 +9096,7 @@ async function generateCertExcel(entry, company, issueDate, selectedCyls, valveT
             cells[`M${r}`] = { t:'s', v: addShared(specStr) };
           }
         }
-        if (valStr) {
-          if (!isNaN(vNum)) {
-            const fixed = formatMin1Decimal(vNum);
-            cells[`Y${r}`] = { t:'s', v: addShared(isPct ? `${fixed} %` : isPpm ? `${fixed} ppm 미만` : fixed) };
-          } else {
-            cells[`Y${r}`] = { t:'s', v: addShared(valStr) };
-          }
-        }
+        // Y열(분석치)은 빈칸으로 두고 직접 기입
       } else {
         // ── Row 22~25 — 큰 병합셀 (M:X, Y:AJ)
         if (specStr) {
@@ -9119,14 +9113,7 @@ async function generateCertExcel(entry, company, issueDate, selectedCyls, valveT
             cells[`M${r}`] = { t:'s', v: addShared(specStr) };
           }
         }
-        if (valStr) {
-          if (!isNaN(vNum)) {
-            const fixed = formatMin1Decimal(vNum);
-            if (isPpm) {
-              cells[`Y${r}`] = { t:'s', v: addShared(`${fixed} ppm 미만`) };
-            } else if (isPct) {
-              cells[`Y${r}`] = { t:'s', v: addShared(`${fixed} %`) };
-            } else {
+        // Y열(분석치)은 빈칸으로 두고 직접 기입
               cells[`Y${r}`] = { t:'s', v: addShared(fixed) };
             }
           } else {
@@ -9208,15 +9195,7 @@ async function generateCertExcel(entry, company, issueDate, selectedCyls, valveT
             cells['M21'] = { t:'s', v: addShared(specStr) };
           }
         }
-        if (valStr) {
-          const num = parseFloat(valStr);
-          if (!isNaN(num)) {
-            const fixed = formatMin1Decimal(num);
-            cells['Y21'] = { t:'s', v: addShared(isPercent ? `${fixed} %` : fixed) };
-          } else {
-            cells['Y21'] = { t:'s', v: addShared(valStr) };
-          }
-        }
+        // Y21(분석치)은 빈칸으로 두고 직접 기입
       } else {
         // Row 22~25 — 큰 병합셀 (M:X, Y:AJ), 소수점 최소 1자리
         if (specStr) {
@@ -9228,15 +9207,7 @@ async function generateCertExcel(entry, company, issueDate, selectedCyls, valveT
             cells[`M${rowNum}`] = { t:'s', v: addShared(specStr) };
           }
         }
-        if (valStr) {
-          const num = parseFloat(valStr);
-          if (!isNaN(num)) {
-            const fixed = formatMin1Decimal(num);
-            cells[`Y${rowNum}`] = { t:'s', v: addShared(`${fixed} ppm 미만`) };
-          } else {
-            cells[`Y${rowNum}`] = { t:'s', v: addShared(valStr) };
-          }
-        }
+        // Y열(분석치)은 빈칸으로 두고 직접 기입
       }
     });
 
