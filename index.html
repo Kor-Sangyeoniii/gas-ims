@@ -388,9 +388,12 @@ console.log('✅ Firebase 초기화 완료');
             <option value="Ar">Ar (아르곤) — kg</option>
           </optgroup>
           <optgroup label="실린더 원재료">
-            <option value="H2">H₂ (수소) — 병 (47L/130bar)</option>
-            <option value="O2">O₂ (산소) — 병 (47L/130bar)</option>
+            <option value="H2_industrial">H₂ (수소) — 공업용 (47L/130bar)</option>
+            <option value="H2_pure">H₂ (수소) — 고순도 (47L/130bar)</option>
+            <option value="O2_industrial">O₂ (산소) — 공업용 (47L/130bar)</option>
+            <option value="O2_pure">O₂ (산소) — 고순도 (47L/130bar)</option>
             <option value="CO2">CO₂ — kg (20kg/병)</option>
+            <option value="CH4">CH₄ (메탄) — 병 (47L/130bar)</option>
           </optgroup>
         </select>
       </div>
@@ -2506,7 +2509,9 @@ let rawMaterials = load(STORE_KEY_RAW, {
   He: { cart_m3: 0, tanks: [] },
   N2: { tanks: [] },
   Ar: { tanks: [] },
-  H2: { btl:0, kg:0 }, O2: { btl:0, kg:0 }, CO2: 0
+  H2_industrial: { btl:0, kg:0 }, H2_pure: { btl:0, kg:0 },
+  O2_industrial: { btl:0, kg:0 }, O2_pure: { btl:0, kg:0 },
+  CO2: 0, CH4: { btl:0, kg:0 }
 });
 
 // ── 마이그레이션 헬퍼: 숫자값 → tanks 배열로 변환
@@ -2583,7 +2588,7 @@ let dashView      = 'total';
 let currentAnLog  = null;
 // ocrParsed 제거됨
 let uploadMode = 'append'; // 'append' | 'replace'
-let incMixGroupId_base = 0;
+let incMixGroupId = 0;
 
 // 전역 상수 목록 (함수보다 앞에 위치)
 const ALL_GAS_LIST = [
@@ -2653,7 +2658,7 @@ window.onFsUpdate = function(key, val) {
     case STORE_KEY_EXPIRE:   expireSettings = val; break;
     case STORE_KEY_CART:     cartridges     = val; break;
     case STORE_KEY_CART_LOG: cartLogs       = val; break;
-    case STORE_KEY_ANALYSIS: analysisData   = val; break;
+    case STORE_KEY_ANALYSIS: analysisData   = val; migrateAnalysisData(); break;
     case STORE_KEY_INCOMING: incomingLogs   = val; break;
     case STORE_KEY_ORDERS:   orders         = val; break;
     case STORE_KEY_USERS:    users          = val; renderUserList && renderUserList(); break;
@@ -2679,7 +2684,7 @@ async function initApp() {
       const keys = [
         [STORE_KEY_INV,      []],
         [STORE_KEY_LOG,      []],
-        [STORE_KEY_RAW,      { He:{tank_kg:0,cart_m3:0}, N2:0, Ar:0, H2:{btl:0,kg:0}, O2:{btl:0,kg:0}, CO2:0 }],
+        [STORE_KEY_RAW,      { He:{tank_kg:0,cart_m3:0}, N2:0, Ar:0, H2_industrial:{btl:0,kg:0}, H2_pure:{btl:0,kg:0}, O2_industrial:{btl:0,kg:0}, O2_pure:{btl:0,kg:0}, CO2:0, CH4:{btl:0,kg:0} }],
         [STORE_KEY_CLIENTS,  []],
         [STORE_KEY_EXPIRE,   []],
         [STORE_KEY_CART,     []],
@@ -2976,7 +2981,6 @@ function showAuthSignup() {
 function startApp() {
   showUserBadge();
   applyRolePermissions();
-  migrateAnalysisData();
   initApp();
 }
 
@@ -4706,7 +4710,7 @@ function renderDash() {
           <td><span style="font-family:var(--mono);font-size:11px;color:var(--warn)">${r.dinoCode||'—'}</span></td>
           <td style="font-size:12px">${r.company}</td>
           <td><span class="tag ${typeClass}">${typeLabel}</span></td>
-          <td class="num" style="color:var(--accent)">${r.full}${isRack?'렉':liq?'개':''}</td>
+          <td class="num" style="color:${r.full < 0 ? 'var(--danger)' : 'var(--accent)'}${r.full < 0 ? ';font-weight:700' : ''}">${r.full < 0 ? '▼' : ''}${r.full}${isRack?'렉':liq?'개':''}</td>
           ${cylCell}
           ${litCell}
           <td class="num" style="color:var(--danger)">${r.empty}${isRack?'렉':liq?'개':''}</td>
@@ -5149,11 +5153,7 @@ function saveTxn() {
       const dFull = -actualFull;
       const dEmpty = empty > 0 ? empty : -actualFull;
 
-      if (inv.full < actualFull) {
-        if (!confirm(`⚠️ 실병 재고(${inv.full}개)보다 많은 ${actualFull}개 출고입니다.\n\n계속하시겠습니까?`)) return;
-      }
-
-      // 재고 업데이트 (통합)
+      // 재고 업데이트 (음수 허용 - 기초재고 미입력 상태에서도 반영)
       inv.full  = inv.full  + dFull;
       inv.empty = inv.empty + dEmpty;
       save(STORE_KEY_INV, inventory);
@@ -5186,12 +5186,9 @@ function saveTxn() {
       return;
     }
 
-    // LOT 선택 없이 단순 출고
+    // LOT 선택 없이 단순 출고 (음수 허용)
     const dFull = -full;
     const dEmpty = empty > 0 ? empty : -full;
-    if (inv.full < full) {
-      if (!confirm(`⚠️ 실병 재고(${inv.full}개)보다 많은 ${full}개 출고입니다.\n\n계속하시겠습니까?`)) return;
-    }
     inv.full  = inv.full  + dFull;
     inv.empty = inv.empty + dEmpty;
     save(STORE_KEY_INV, inventory);
@@ -5444,9 +5441,10 @@ function symToRawKey(sym) {
   if (s === 'HE')  return 'He';
   if (s === 'N₂' || s === 'N2') return 'N2';
   if (s === 'AR')  return 'Ar';
-  if (s === 'H₂' || s === 'H2') return 'H2';
-  if (s === 'O₂' || s === 'O2') return 'O2';
+  if (s === 'H₂' || s === 'H2') return 'H2_industrial'; // 기본 공업용
+  if (s === 'O₂' || s === 'O2') return 'O2_industrial'; // 기본 공업용
   if (s === 'CO₂' || s === 'CO2') return 'CO2';
+  if (s === 'CH₄' || s === 'CH4') return 'CH4';
   return null;
 }
 
@@ -5455,8 +5453,9 @@ function m3ToKg(m3, key) {
   if (key === 'He')  return m3 / HE_KG_TO_M3;
   if (key === 'N2')  return m3 / N2_KG_TO_M3;
   if (key === 'Ar')  return m3 / AR_KG_TO_M3;
-  if (key === 'H2')  return m3 * H2_DENSITY;
-  if (key === 'O2')  return m3 * O2_DENSITY;
+  if (key === 'H2' || key === 'H2_industrial' || key === 'H2_pure') return m3 * H2_DENSITY;
+  if (key === 'O2' || key === 'O2_industrial' || key === 'O2_pure') return m3 * O2_DENSITY;
+  if (key === 'CH4') return m3 * 0.668;
   return 0;
 }
 
@@ -5497,47 +5496,35 @@ function deductRawFromProduction(consumption) {
     const kgNeed = c.kgTotal;
     let warn = null;
 
-    if (c.key === 'H2' || c.key === 'O2') {
+    if (c.key === 'H2' || c.key === 'O2' || c.key === 'H2_industrial' || c.key === 'H2_pure' || c.key === 'O2_industrial' || c.key === 'O2_pure' || c.key === 'CH4') {
       // 실린더 원재료: kg → 필요 병 수 계산
-      const kgPerBtl  = cylKgPerBtl(c.key === 'H2' ? H2_DENSITY : O2_DENSITY);
-      const btlNeeded = kgNeed / kgPerBtl;
-      const btlWhole  = Math.ceil(btlNeeded); // 올림 (병 단위)
-      const cur = rawMaterials[c.key] || { btl:0, kg:0 };
-      // 잔량 kg에서 차감, 부족하면 병 개방
-      let remKg = cur.kg;
-      let remBtl = cur.btl;
-      let needKg = kgNeed;
-      let usedBtl = 0;
+      const baseKey = c.key.startsWith('H2') ? 'H2' : c.key.startsWith('O2') ? 'O2' : 'CH4';
+      const density = baseKey === 'H2' ? H2_DENSITY : baseKey === 'O2' ? O2_DENSITY : 0.668; // CH4 밀도
+      const kgPerBtl = cylKgPerBtl(density);
+
+      // 공업용/고순도 구분 - 해당 등급 먼저, 없으면 다른 등급에서 차감
+      const gradeKey = (c.key === 'H2' || c.key === 'O2') ? c.key + '_industrial' : c.key;
+      const altKey   = (c.key === 'H2' || c.key === 'O2') ? c.key + '_pure' : null;
+
+      const cur = rawMaterials[gradeKey] || { btl:0, kg:0 };
+      let remKg = cur.kg, remBtl = cur.btl, needKg = kgNeed, usedBtl = 0;
 
       while (needKg > 0) {
-        if (remKg >= needKg) {
-          remKg -= needKg;
-          needKg = 0;
-        } else {
-          // 현재 병 소진 → 새 병 개봉
-          needKg -= remKg;
-          remKg = 0;
-          if (remBtl > 0) {
-            remBtl--;
-            usedBtl++;
-            remKg = kgPerBtl; // 새 병 충전
-          } else {
-            warn = `⚠️ ${c.key} 재고 부족`;
-            break;
-          }
+        if (remKg >= needKg) { remKg -= needKg; needKg = 0; }
+        else {
+          needKg -= remKg; remKg = 0;
+          if (remBtl > 0) { remBtl--; usedBtl++; remKg = kgPerBtl; }
+          else { warn = `⚠️ ${c.key} 재고 부족`; break; }
         }
       }
 
-      // 잔량이 폐기 기준 이하면 병 차감
-      const wasteKgThreshold = c.key === 'H2' ? cylM3PerBtl()*H2_DENSITY*(10/130) : cylM3PerBtl()*O2_DENSITY*(10/130);
-      const wastePressureKg  = pvtM3(CYL_VOL_L, CYL_WASTE_BAR) * (c.key === 'H2' ? H2_DENSITY : O2_DENSITY);
+      const wastePressureKg = pvtM3(CYL_VOL_L, CYL_WASTE_BAR) * density;
       if (remKg > 0 && remKg <= wastePressureKg) {
-        warn = (warn||'') + ` 💡 ${c.key} 잔압 부족 (${remKg.toFixed(2)}kg ≈ ${(remKg/( c.key==='H2'?H2_DENSITY:O2_DENSITY)/CYL_VOL_L*ATM_KGF*1000/98.0665/25/273.15*25+273.15).toFixed(1)}bar 추정) → 1병 폐기`;
-        remBtl--;
-        remKg = 0;
+        warn = (warn||'') + ` 💡 ${c.key} 잔압 부족 → 1병 폐기`;
+        remBtl--; remKg = 0;
       }
 
-      rawMaterials[c.key] = { btl: Math.max(0, remBtl), kg: Math.max(0, remKg) };
+      rawMaterials[gradeKey] = { btl: Math.max(0, remBtl), kg: Math.max(0, remKg) };
       deducted.push({ ...c, usedBtl, remainKg: Math.max(0, remKg), remainBtl: Math.max(0, remBtl), warn });
 
     } else if (c.key === 'CO2') {
@@ -5742,17 +5729,22 @@ function addRawMaterial() {
       gas:'He_cart', m3: Math.round(m3*10000)/10000, kg:Math.round(kg*1000)/1000,
       note, memo:`He 카트리지 입고 +${m3.toFixed(4)}m³` });
 
-  } else if (gas === 'H2' || gas === 'O2') {
+  } else if (gas === 'H2' || gas === 'O2' || gas === 'H2_industrial' || gas === 'H2_pure' || gas === 'O2_industrial' || gas === 'O2_pure' || gas === 'CH4') {
     const qty = parseFloat(document.getElementById('rawKg').value);
     if (!qty||qty<=0) { alert('병 수를 입력해주세요.'); return; }
     const btlQty = Math.round(qty);
-    const kgPerBtl = cylKgPerBtl(gas==='H2'?H2_DENSITY:O2_DENSITY);
-    const cur = rawMaterials[gas] || { btl:0, kg:0 };
-    rawMaterials[gas] = { btl: cur.btl+btlQty, kg: cur.kg };
+    const baseKey = gas.startsWith('H2') ? 'H2' : gas.startsWith('O2') ? 'O2' : 'CH4';
+    const density = baseKey==='H2' ? H2_DENSITY : baseKey==='O2' ? O2_DENSITY : 0.668;
+    const kgPerBtl = cylKgPerBtl(density);
+    // 구분 없이 입력된 경우 공업용으로 처리
+    const storeKey = (gas === 'H2') ? 'H2_industrial' : (gas === 'O2') ? 'O2_industrial' : gas;
+    const cur = rawMaterials[storeKey] || { btl:0, kg:0 };
+    rawMaterials[storeKey] = { btl: cur.btl+btlQty, kg: cur.kg };
     save(STORE_KEY_RAW, rawMaterials);
     cartLogs.push({ id:uid(), date:today(), time:now(), type:'raw_in',
-      gas, btl:btlQty, kg:Math.round(btlQty*kgPerBtl*100)/100, note,
-      memo:`${gas} 원재료 +${btlQty}병` });
+      gas: storeKey, btl:btlQty, kg:Math.round(btlQty*kgPerBtl*100)/100, note,
+      memo:`${storeKey} 원재료 +${btlQty}병` });
+    renderCylRawTiles();
 
   } else if (gas === 'CO2') {
     const kg = parseFloat(document.getElementById('rawKg').value);
@@ -5943,27 +5935,29 @@ function renderCylRawTiles() {
   const wrap = document.getElementById('cylRawTiles');
   if (!wrap) return;
 
-  const h2  = rawMaterials.H2  || { btl:0, kg:0 };
-  const o2  = rawMaterials.O2  || { btl:0, kg:0 };
+  const h2i = rawMaterials.H2_industrial || rawMaterials.H2 || { btl:0, kg:0 };
+  const h2p = rawMaterials.H2_pure       || { btl:0, kg:0 };
+  const o2i = rawMaterials.O2_industrial || rawMaterials.O2 || { btl:0, kg:0 };
+  const o2p = rawMaterials.O2_pure       || { btl:0, kg:0 };
   const co2Kg = rawMaterials.CO2 || 0;
+  const ch4 = rawMaterials.CH4 || { btl:0, kg:0 };
 
-  const h2KgPerBtl = cylKgPerBtl(H2_DENSITY);
-  const o2KgPerBtl = cylKgPerBtl(O2_DENSITY);
-  const co2Btl     = co2Kg / CO2_KG_PER_BTL;
+  const h2KgPerBtl  = cylKgPerBtl(H2_DENSITY);
+  const o2KgPerBtl  = cylKgPerBtl(O2_DENSITY);
+  const ch4KgPerBtl = cylKgPerBtl(0.668);
+  const co2Btl      = co2Kg / CO2_KG_PER_BTL;
+
+  const wasteH2  = pvtM3(CYL_VOL_L, CYL_WASTE_BAR) * H2_DENSITY;
+  const wasteO2  = pvtM3(CYL_VOL_L, CYL_WASTE_BAR) * O2_DENSITY;
+  const wasteCH4 = pvtM3(CYL_VOL_L, CYL_WASTE_BAR) * 0.668;
 
   const cylInfo = [
-    { label:'H₂ (수소)', color:'var(--accent2)',
-      btl: h2.btl, kgAvail: h2.btl * h2KgPerBtl + h2.kg,
-      kgPerBtl: h2KgPerBtl, unit:'47L/130bar',
-      wasteKg: pvtM3(CYL_VOL_L, CYL_WASTE_BAR) * H2_DENSITY },
-    { label:'O₂ (산소)', color:'var(--warn)',
-      btl: o2.btl, kgAvail: o2.btl * o2KgPerBtl + o2.kg,
-      kgPerBtl: o2KgPerBtl, unit:'47L/130bar',
-      wasteKg: pvtM3(CYL_VOL_L, CYL_WASTE_BAR) * O2_DENSITY },
-    { label:'CO₂', color:'var(--teal)',
-      btl: Math.floor(co2Btl), kgAvail: co2Kg,
-      kgPerBtl: CO2_KG_PER_BTL, unit:'20kg/병',
-      wasteKg: CO2_WASTE_KG },
+    { label:'H₂ 공업용', color:'var(--accent2)', btl:h2i.btl, kgAvail:h2i.btl*h2KgPerBtl+h2i.kg, kgPerBtl:h2KgPerBtl, unit:'47L/130bar', wasteKg:wasteH2 },
+    { label:'H₂ 고순도', color:'#7ee8fa',        btl:h2p.btl, kgAvail:h2p.btl*h2KgPerBtl+h2p.kg, kgPerBtl:h2KgPerBtl, unit:'47L/130bar', wasteKg:wasteH2 },
+    { label:'O₂ 공업용', color:'var(--warn)',     btl:o2i.btl, kgAvail:o2i.btl*o2KgPerBtl+o2i.kg, kgPerBtl:o2KgPerBtl, unit:'47L/130bar', wasteKg:wasteO2 },
+    { label:'O₂ 고순도', color:'#f9a03f',         btl:o2p.btl, kgAvail:o2p.btl*o2KgPerBtl+o2p.kg, kgPerBtl:o2KgPerBtl, unit:'47L/130bar', wasteKg:wasteO2 },
+    { label:'CO₂',       color:'var(--teal)',     btl:Math.floor(co2Btl), kgAvail:co2Kg, kgPerBtl:CO2_KG_PER_BTL, unit:'20kg/병', wasteKg:CO2_WASTE_KG },
+    { label:'CH₄ (메탄)', color:'var(--purple)',  btl:ch4.btl, kgAvail:ch4.btl*ch4KgPerBtl+ch4.kg, kgPerBtl:ch4KgPerBtl, unit:'47L/130bar', wasteKg:wasteCH4 },
   ];
 
   wrap.innerHTML = cylInfo.map(g => {
@@ -7212,9 +7206,44 @@ function renderOrderHist() {
 function markOrderDone(id) {
   const o = orders.find(o => o.id === id);
   if (!o) return;
+  if (!confirm(`"${o.company}" 발주를 납품 완료 처리하시겠습니까?\n\n재고에서 실병이 자동 차감됩니다.`)) return;
+
   o.status = 'done';
+  o.doneAt = now();
   save(STORE_KEY_ORDERS, orders);
+
+  // ── 재고 차감 + 출고 로그 기록
+  const date = today();
+  (o.items || []).forEach(item => {
+    if (!item.gas || !item.size || !item.qty) return;
+    const qty = parseInt(item.qty) || 0;
+    if (!qty) return;
+
+    // 재고에서 실병 차감 (없으면 자동 생성, 음수 허용)
+    let inv = inventory.find(r => r.gas === item.gas && r.size === item.size && r.company === o.company);
+    if (!inv) {
+      inv = { id: uid(), gas: item.gas, size: item.size, company: o.company, dinoCode: '', full: 0, empty: 0, liter: null };
+      inventory.push(inv);
+    }
+    inv.full = inv.full - qty;
+    save(STORE_KEY_INV, inventory);
+
+    // 출고 로그
+    logs.push({
+      id: uid(), date, time: now(),
+      type: 'ship', typeLabel: '출고(발주)',
+      gas: item.gas, size: item.size,
+      company: o.company,
+      dFull: -qty, dEmpty: 0,
+      memo: `발주 납품완료 (발주ID: ${o.id.slice(-6)})`,
+      lotNo: '', cylinders: [],
+    });
+  });
+  save(STORE_KEY_LOG, logs);
+
   renderOrderHist();
+  renderDash();
+  alert(`✅ 납품 완료 처리됐습니다.\n재고에서 실병이 차감됐습니다.`);
 }
 
 function deleteOrder(id) {
@@ -10817,7 +10846,7 @@ function resetAll() {
   });
   inventory = []; logs = []; cartridges = []; cartLogs = []; clients = [];
   orders = []; analysisData = []; incomingLogs = []; expireSettings = [];
-  rawMaterials = { He:{tank_kg:0,cart_m3:0}, N2:0, Ar:0, H2:{btl:0,kg:0}, O2:{btl:0,kg:0}, CO2:0 };
+  rawMaterials = { He:{tank_kg:0,cart_m3:0}, N2:0, Ar:0, H2_industrial:{btl:0,kg:0}, H2_pure:{btl:0,kg:0}, O2_industrial:{btl:0,kg:0}, O2_pure:{btl:0,kg:0}, CO2:0, CH4:{btl:0,kg:0} };
   renderAll();
   renderClientList();
   alert('✅ 초기화 완료');
