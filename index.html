@@ -362,11 +362,12 @@ console.log('✅ Firebase 초기화 완료');
 
     <!-- Bulk 가스 타일 (He, N₂, Ar) -->
     <div style="font-size:10px;font-weight:700;color:var(--text3);letter-spacing:.08em;margin-bottom:8px">BULK 가스 (kg)</div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px;margin-bottom:16px" id="rawMaterialTiles"></div>
+    <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:16px" id="rawMaterialTiles"></div>
+    <!-- 실린더 원재료 타일 (H₂, O₂, CO₂, CH₄) - rawMaterialTiles 안에 통합됨 -->
 
     <!-- 실린더 원재료 타일 (H₂, O₂, CO₂) -->
     <div style="font-size:10px;font-weight:700;color:var(--text3);letter-spacing:.08em;margin-bottom:8px">실린더 원재료</div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px" id="cylRawTiles"></div>
+    <div style="display:none" id="cylRawTiles"></div>
   </div>
 
   <!-- 원재료 입고 모달 -->
@@ -392,7 +393,8 @@ console.log('✅ Firebase 초기화 완료');
             <option value="H2_pure">H₂ (수소) — 고순도 (47L/130bar)</option>
             <option value="O2_industrial">O₂ (산소) — 공업용 (47L/130bar)</option>
             <option value="O2_pure">O₂ (산소) — 고순도 (47L/130bar)</option>
-            <option value="CO2">CO₂ — kg (20kg/병)</option>
+            <option value="CO2_industrial">CO₂ (이산화탄소) — 공업용 (20kg/병)</option>
+            <option value="CO2_pure">CO₂ (이산화탄소) — 고순도 (20kg/병)</option>
             <option value="CH4">CH₄ (메탄) — 병 (47L/130bar)</option>
           </optgroup>
         </select>
@@ -408,6 +410,12 @@ console.log('✅ Firebase 초기화 완료');
       <div id="rawFieldKg" class="field">
         <label id="rawQtyLabel">입고량 (kg)</label>
         <input type="number" id="rawKg" min="0" step="0.1" placeholder="0" style="width:100%">
+      </div>
+
+      <!-- 공병 수 입력 (실린더 원재료만) -->
+      <div id="rawFieldEmpty" class="field" style="display:none">
+        <label>공병 수 (반납 예정)</label>
+        <input type="number" id="rawEmpty" min="0" step="1" placeholder="0" style="width:100%">
       </div>
 
       <!-- He 카트리지 PVT 입력 -->
@@ -1649,9 +1657,14 @@ console.log('✅ Firebase 초기화 완료');
     <div class="flex-gap" style="gap:10px;flex-wrap:wrap;margin-bottom:12px">
       <div class="field">
         <label>가스 품목</label>
-        <select id="anGas" onchange="loadAnLots()" style="width:180px">
+        <select id="anGas" style="width:180px">
           <option value="">전체</option>
         </select>
+      </div>
+      <div class="field">
+        <label>LOT 번호 검색</label>
+        <input type="text" id="anLotSearch" placeholder="LOT 번호 입력..." style="width:200px" autocomplete="off"
+          onkeydown="if(event.key==='Enter') loadAnLots()">
       </div>
       <div class="field">
         <label>기간</label>
@@ -2509,9 +2522,10 @@ let rawMaterials = load(STORE_KEY_RAW, {
   He: { cart_m3: 0, tanks: [] },
   N2: { tanks: [] },
   Ar: { tanks: [] },
-  H2_industrial: { btl:0, kg:0 }, H2_pure: { btl:0, kg:0 },
-  O2_industrial: { btl:0, kg:0 }, O2_pure: { btl:0, kg:0 },
-  CO2: 0, CH4: { btl:0, kg:0 }
+  H2_industrial: { btl:0, kg:0, empty:0 }, H2_pure: { btl:0, kg:0, empty:0 },
+  O2_industrial: { btl:0, kg:0, empty:0 }, O2_pure: { btl:0, kg:0, empty:0 },
+  CO2_industrial: { btl:0, kg:0, empty:0 }, CO2_pure: { btl:0, kg:0, empty:0 },
+  CH4: { btl:0, kg:0, empty:0 }
 });
 
 // ── 마이그레이션 헬퍼: 숫자값 → tanks 배열로 변환
@@ -2684,7 +2698,7 @@ async function initApp() {
       const keys = [
         [STORE_KEY_INV,      []],
         [STORE_KEY_LOG,      []],
-        [STORE_KEY_RAW,      { He:{tank_kg:0,cart_m3:0}, N2:0, Ar:0, H2_industrial:{btl:0,kg:0}, H2_pure:{btl:0,kg:0}, O2_industrial:{btl:0,kg:0}, O2_pure:{btl:0,kg:0}, CO2:0, CH4:{btl:0,kg:0} }],
+        [STORE_KEY_RAW,      { He:{tank_kg:0,cart_m3:0}, N2:0, Ar:0, H2_industrial:{btl:0,kg:0,empty:0}, H2_pure:{btl:0,kg:0,empty:0}, O2_industrial:{btl:0,kg:0,empty:0}, O2_pure:{btl:0,kg:0,empty:0}, CO2_industrial:{btl:0,kg:0,empty:0}, CO2_pure:{btl:0,kg:0,empty:0}, CH4:{btl:0,kg:0,empty:0} }],
         [STORE_KEY_CLIENTS,  []],
         [STORE_KEY_EXPIRE,   []],
         [STORE_KEY_CART,     []],
@@ -5662,10 +5676,11 @@ function onRawGasSelChange() {
   const fieldKg     = document.getElementById('rawFieldKg');
   const fieldCart   = document.getElementById('rawFieldCart');
   const fieldTankNo = document.getElementById('rawFieldTankNo');
+  const fieldEmpty  = document.getElementById('rawFieldEmpty');
   const tankNoLabel = fieldTankNo?.querySelector('label');
 
-  fieldCart.style.display = gas === 'He_cart' ? 'block' : 'none';
-  fieldKg.style.display   = gas === 'He_cart' ? 'none'  : 'block';
+  fieldCart.style.display  = gas === 'He_cart' ? 'block' : 'none';
+  fieldKg.style.display    = gas === 'He_cart' ? 'none'  : 'block';
 
   // ISO Tank 번호는 He_tank, N2, Ar 에서 표시
   const showTank = gas === 'He_tank' || gas === 'N2' || gas === 'Ar';
@@ -5675,10 +5690,16 @@ function onRawGasSelChange() {
     tankNoLabel.innerHTML = `${prefix} 탱크 번호 <span style="color:var(--text3);font-size:10px;font-weight:400">(예: ${prefix}-2026-04-A)</span>`;
   }
 
-  if (gas === 'H2' || gas === 'O2') {
-    lbl.textContent = '입고 수량 (병)';
+  // 공병 수 입력: 실린더 원재료만 표시
+  const isCylinder = ['H2_industrial','H2_pure','O2_industrial','O2_pure','CO2_industrial','CO2_pure','CH4'].includes(gas);
+  if (fieldEmpty) fieldEmpty.style.display = isCylinder ? 'block' : 'none';
+
+  if (isCylinder) {
+    const isCO2 = gas.startsWith('CO2');
+    lbl.textContent = `입고 수량 (병)`;
     inp.step = '1'; inp.placeholder = '병 수';
-  } else if (gas === 'He_tank' || gas === 'N2' || gas === 'Ar') {
+    if (isCO2) { inp.step = '0.1'; inp.placeholder = '병 수 (20kg/병)'; }
+  } else if (showTank) {
     const prefix = gas === 'He_tank' ? 'He' : gas === 'N2' ? 'N₂' : 'Ar';
     lbl.textContent = `${prefix} 입고량 (kg)`;
     inp.step = '0.1'; inp.placeholder = 'kg';
@@ -5729,17 +5750,17 @@ function addRawMaterial() {
       gas:'He_cart', m3: Math.round(m3*10000)/10000, kg:Math.round(kg*1000)/1000,
       note, memo:`He 카트리지 입고 +${m3.toFixed(4)}m³` });
 
-  } else if (gas === 'H2' || gas === 'O2' || gas === 'H2_industrial' || gas === 'H2_pure' || gas === 'O2_industrial' || gas === 'O2_pure' || gas === 'CH4') {
+  } else if (gas === 'H2' || gas === 'O2' || gas === 'H2_industrial' || gas === 'H2_pure' || gas === 'O2_industrial' || gas === 'O2_pure' || gas === 'CH4' || gas === 'CO2_industrial' || gas === 'CO2_pure') {
     const qty = parseFloat(document.getElementById('rawKg').value);
     if (!qty||qty<=0) { alert('병 수를 입력해주세요.'); return; }
     const btlQty = Math.round(qty);
-    const baseKey = gas.startsWith('H2') ? 'H2' : gas.startsWith('O2') ? 'O2' : 'CH4';
-    const density = baseKey==='H2' ? H2_DENSITY : baseKey==='O2' ? O2_DENSITY : 0.668;
-    const kgPerBtl = cylKgPerBtl(density);
-    // 구분 없이 입력된 경우 공업용으로 처리
+    const isCO2  = gas.startsWith('CO2');
+    const baseKey = gas.startsWith('H2') ? 'H2' : gas.startsWith('O2') ? 'O2' : isCO2 ? 'CO2' : 'CH4';
+    const density = baseKey==='H2' ? H2_DENSITY : baseKey==='O2' ? O2_DENSITY : isCO2 ? 0 : 0.668;
+    const kgPerBtl = isCO2 ? CO2_KG_PER_BTL : cylKgPerBtl(density);
     const storeKey = (gas === 'H2') ? 'H2_industrial' : (gas === 'O2') ? 'O2_industrial' : gas;
-    const cur = rawMaterials[storeKey] || { btl:0, kg:0 };
-    rawMaterials[storeKey] = { btl: cur.btl+btlQty, kg: cur.kg };
+    const cur = rawMaterials[storeKey] || { btl:0, kg:0, empty:0 };
+    rawMaterials[storeKey] = { btl: cur.btl+btlQty, kg: isCO2 ? (cur.kg||0)+btlQty*kgPerBtl : cur.kg, empty: cur.empty||0 };
     save(STORE_KEY_RAW, rawMaterials);
     cartLogs.push({ id:uid(), date:today(), time:now(), type:'raw_in',
       gas: storeKey, btl:btlQty, kg:Math.round(btlQty*kgPerBtl*100)/100, note,
@@ -5831,30 +5852,21 @@ function renderRawTiles() {
 
   const he = rawMaterials.He || { cart_m3:0, tanks:[] };
   if (!Array.isArray(he.tanks)) he.tanks = [];
-  const heTankKg  = he.tanks.reduce((s,t) => s + (t.kg_remaining||0), 0);
-  const heCartM3  = he.cart_m3  || 0;
-  const heCartKg  = heCartM3 / HE_KG_TO_M3;
-  const heTotalKg = heTankKg + heCartKg;
-  const heTotalM3 = heTotalKg * HE_KG_TO_M3;
-  const showKg    = heDisplayUnit !== 'm3';
+  const heTankKg = he.tanks.reduce((s,t) => s+(t.kg_remaining||0), 0);
+  const heCartM3 = he.cart_m3 || 0;
+  const heCartKg = heCartM3 / HE_KG_TO_M3;
+  const showKg   = heDisplayUnit !== 'm3';
 
-  // He 타일
-  const heVal     = showKg ? heTotalKg : heTotalM3;
-  const heUnit    = showKg ? 'kg' : 'm³';
-  const heAlt     = showKg ? `= ${heTotalM3.toFixed(2)} m³` : `= ${heTotalKg.toFixed(2)} kg`;
-  const hePct     = Math.min(100, Math.round(heTotalKg/300*100));
-  const heBar     = hePct>=40?'#39d353':hePct>=15?'#d29922':'#f85149';
-
-  // ISO Tank 목록
-  const activeTanks = he.tanks.filter(t => t.kg_remaining > 0).sort((a,b) => b.kg_remaining - a.kg_remaining);
+  // ── He ISO Tank 타일
+  const activeTanks = he.tanks.filter(t=>t.kg_remaining>0).sort((a,b)=>b.kg_remaining-a.kg_remaining);
   const tankListHtml = activeTanks.length > 0
     ? `<div style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--border);font-size:10px">
         <div style="color:var(--text3);margin-bottom:3px;font-weight:700">ISO Tank 목록 (${activeTanks.length}개)</div>
-        ${activeTanks.map(t => {
-          const pct = t.kg_initial > 0 ? Math.round(t.kg_remaining/t.kg_initial*100) : 0;
-          const c = pct>=40?'var(--accent)':pct>=15?'var(--warn)':'var(--danger)';
+        ${activeTanks.map(t=>{
+          const pct=t.kg_initial>0?Math.round(t.kg_remaining/t.kg_initial*100):0;
+          const c=pct>=40?'var(--accent)':pct>=15?'var(--warn)':'var(--danger)';
           return `<div style="display:flex;justify-content:space-between;align-items:center;gap:4px;margin-bottom:2px;font-family:var(--mono)">
-            <span style="color:var(--text2);font-size:10px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">${t.no}</span>
+            <span style="color:var(--text2);font-size:10px;flex:1;overflow:hidden;text-overflow:ellipsis">${t.no}</span>
             <span style="color:${c};font-weight:700">${t.kg_remaining.toFixed(2)}kg</span>
             <span style="color:var(--text3);font-size:9px">(${pct}%)</span>
             <button type="button" onclick="returnRawTank('He','${t.id}')" style="background:rgba(248,81,73,.1);border:1px solid var(--danger);color:var(--danger);border-radius:3px;padding:1px 5px;font-size:9px;cursor:pointer">🚚</button>
@@ -5863,47 +5875,64 @@ function renderRawTiles() {
       </div>`
     : '<div style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--border);font-size:10px;color:var(--text3);text-align:center">ISO Tank 입고 없음</div>';
 
-  const heTile = `<div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:12px 16px;grid-column:span 1">
+  const heTankVal = showKg ? heTankKg.toFixed(2) : (heTankKg*HE_KG_TO_M3).toFixed(2);
+  const heUnit    = showKg ? 'kg' : 'm³';
+  const heTankPct = Math.min(100, Math.round(heTankKg/300*100));
+  const heTankBar = heTankPct>=40?'#39d353':heTankPct>=15?'#d29922':'#f85149';
+
+  const tileIsoTank = `<div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:12px 16px">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
-      <span style="font-size:11px;font-weight:700;color:var(--accent);letter-spacing:.06em">He (헬륨)</span>
+      <span style="font-size:11px;font-weight:700;color:var(--accent);letter-spacing:.06em">He — ISO Tank</span>
       <span style="font-size:10px;color:var(--text3)">1kg=6.03m³</span>
     </div>
     <div style="display:flex;align-items:baseline;gap:5px;margin-bottom:2px">
-      <span style="font-family:var(--mono);font-size:22px;font-weight:700;color:var(--accent)">${heVal.toFixed(showKg?2:4)}</span>
+      <span style="font-family:var(--mono);font-size:22px;font-weight:700;color:var(--accent)">${heTankVal}</span>
       <span style="font-size:11px;color:var(--text3)">${heUnit}</span>
-      <span style="font-size:11px;color:var(--text3);margin-left:4px">${heAlt}</span>
     </div>
-    <div style="font-size:10px;color:var(--text3);margin-bottom:5px">
-      ISO Tank: <span style="color:var(--accent);font-family:var(--mono)">${showKg?heTankKg.toFixed(2):(heTankKg*HE_KG_TO_M3).toFixed(2)}</span>${heUnit}
-      &nbsp;|&nbsp;
-      카트리지: <span style="color:var(--teal);font-family:var(--mono)">${showKg?heCartKg.toFixed(2):heCartM3.toFixed(3)}</span>${heUnit}
-    </div>
-    <div style="height:4px;background:var(--bg4);border-radius:2px">
-      <div style="height:4px;width:${hePct}%;background:${heBar};border-radius:2px;transition:width .3s"></div>
+    <div style="height:4px;background:var(--bg4);border-radius:2px;margin-bottom:4px">
+      <div style="height:4px;width:${heTankPct}%;background:${heTankBar};border-radius:2px;transition:width .3s"></div>
     </div>
     ${tankListHtml}
   </div>`;
 
-  // N₂, Ar 타일 — 탱크별 표시
-  const otherTiles = [
-    { key:'N2', label:'N₂ (질소)', conv:N2_KG_TO_M3, color:'var(--teal)',   sub:'1kg=0.799m³' },
-    { key:'Ar', label:'Ar (아르곤)',conv:AR_KG_TO_M3, color:'var(--purple)',sub:'1kg=0.561m³' },
+  // ── He 카트리지 타일
+  const heCartVal = showKg ? heCartKg.toFixed(2) : heCartM3.toFixed(3);
+  const heCartPct = Math.min(100, Math.round(heCartKg/300*100));
+  const heCartBar = heCartPct>=40?'#39d353':heCartPct>=15?'#d29922':'#f85149';
+  const tileCart  = `<div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:12px 16px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+      <span style="font-size:11px;font-weight:700;color:var(--teal);letter-spacing:.06em">He — 카트리지</span>
+      <span style="font-size:10px;color:var(--text3)">m³</span>
+    </div>
+    <div style="display:flex;align-items:baseline;gap:5px;margin-bottom:2px">
+      <span style="font-family:var(--mono);font-size:22px;font-weight:700;color:var(--teal)">${heCartVal}</span>
+      <span style="font-size:11px;color:var(--text3)">${heUnit}</span>
+    </div>
+    <div style="height:4px;background:var(--bg4);border-radius:2px">
+      <div style="height:4px;width:${heCartPct}%;background:${heCartBar};border-radius:2px;transition:width .3s"></div>
+    </div>
+  </div>`;
+
+  // ── 질소 / 아르곤 타일
+  const bulkTiles = [
+    { key:'N2', label:'N₂ (질소)',  conv:N2_KG_TO_M3, color:'var(--teal)',   sub:'1kg=0.799m³' },
+    { key:'Ar', label:'Ar (아르곤)', conv:AR_KG_TO_M3, color:'var(--purple)', sub:'1kg=0.561m³' },
   ].map(g => {
-    const mat = rawMaterials[g.key] || { tanks: [] };
+    const mat = rawMaterials[g.key] || { tanks:[] };
     const tanks = Array.isArray(mat.tanks) ? mat.tanks : [];
-    const kg  = tanks.reduce((s,t) => s + (t.kg_remaining||0), 0);
+    const kg  = tanks.reduce((s,t)=>s+(t.kg_remaining||0), 0);
     const m3  = kg * g.conv;
     const pct = Math.min(100, Math.round(kg/300*100));
-    const barColor = pct>=40?'#39d353':pct>=15?'#d29922':'#f85149';
-    const active = tanks.filter(t => t.kg_remaining > 0).sort((a,b) => b.kg_remaining - a.kg_remaining);
-    const tankListHtml = active.length > 0
+    const bar = pct>=40?'#39d353':pct>=15?'#d29922':'#f85149';
+    const active = tanks.filter(t=>t.kg_remaining>0).sort((a,b)=>b.kg_remaining-a.kg_remaining);
+    const tListHtml = active.length > 0
       ? `<div style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--border);font-size:10px">
           <div style="color:var(--text3);margin-bottom:3px;font-weight:700">탱크 (${active.length}개)</div>
-          ${active.map(t => {
-            const p = t.kg_initial > 0 ? Math.round(t.kg_remaining/t.kg_initial*100) : 0;
-            const c = p>=40?'var(--accent)':p>=15?'var(--warn)':'var(--danger)';
+          ${active.map(t=>{
+            const p=t.kg_initial>0?Math.round(t.kg_remaining/t.kg_initial*100):0;
+            const c=p>=40?'var(--accent)':p>=15?'var(--warn)':'var(--danger)';
             return `<div style="display:flex;justify-content:space-between;align-items:center;gap:4px;margin-bottom:2px;font-family:var(--mono)">
-              <span style="color:var(--text2);font-size:10px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">${t.no}</span>
+              <span style="color:var(--text2);font-size:10px;flex:1;overflow:hidden;text-overflow:ellipsis">${t.no}</span>
               <span style="color:${c};font-weight:700">${t.kg_remaining.toFixed(2)}kg</span>
               <span style="color:var(--text3);font-size:9px">(${p}%)</span>
               <button type="button" onclick="returnRawTank('${g.key}','${t.id}')" style="background:rgba(248,81,73,.1);border:1px solid var(--danger);color:var(--danger);border-radius:3px;padding:1px 5px;font-size:9px;cursor:pointer">🚚</button>
@@ -5922,13 +5951,74 @@ function renderRawTiles() {
         <span style="font-size:11px;color:var(--text3);margin-left:4px">= ${m3.toFixed(2)} m³</span>
       </div>
       <div style="height:4px;background:var(--bg4);border-radius:2px">
-        <div style="height:4px;width:${pct}%;background:${barColor};border-radius:2px;transition:width .3s"></div>
+        <div style="height:4px;width:${pct}%;background:${bar};border-radius:2px;transition:width .3s"></div>
       </div>
-      ${tankListHtml}
+      ${tListHtml}
     </div>`;
   }).join('');
 
-  wrap.innerHTML = heTile + otherTiles;
+  // ── H₂/O₂/CO₂/CH₄ 실린더 타일 생성 함수
+  function makeCylTile(label, color, unit, key, kgPerBtl) {
+    const cur = rawMaterials[key] || { btl:0, kg:0, empty:0 };
+    const kgAvail = cur.btl * kgPerBtl + (cur.kg||0);
+    const empty   = cur.empty || 0;
+    const pct = cur.btl>0 ? Math.min(100, Math.round(kgAvail/(kgPerBtl*cur.btl)*100)) : 0;
+    const bar = pct>=40?'#39d353':pct>=15?'#d29922':'#f85149';
+    return `<div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:12px 16px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <span style="font-size:11px;font-weight:700;color:${color};letter-spacing:.06em">${label}</span>
+        <span style="font-size:10px;color:var(--text3)">${unit}</span>
+      </div>
+      <div style="display:flex;align-items:baseline;gap:6px;margin-bottom:2px">
+        <span style="font-family:var(--mono);font-size:22px;font-weight:700;color:${color}">${cur.btl}</span>
+        <span style="font-size:11px;color:var(--text3)">실병</span>
+        <span style="font-size:11px;color:var(--danger);margin-left:8px;font-family:var(--mono)">${empty}</span>
+        <span style="font-size:11px;color:var(--danger)">공병</span>
+      </div>
+      <div style="font-size:10px;color:var(--text3);margin-bottom:5px">≈ ${kgAvail.toFixed(2)} kg (1병=${kgPerBtl.toFixed(2)}kg)</div>
+      <div style="height:4px;background:var(--bg4);border-radius:2px">
+        <div style="height:4px;width:${pct}%;background:${bar};border-radius:2px;transition:width .3s"></div>
+      </div>
+    </div>`;
+  }
+
+  const h2KgPerBtl  = cylKgPerBtl(H2_DENSITY);
+  const o2KgPerBtl  = cylKgPerBtl(O2_DENSITY);
+  const ch4KgPerBtl = cylKgPerBtl(0.668);
+  const co2KgPerBtl = CO2_KG_PER_BTL;
+
+  // CO₂ — kg 기반이라 btl=병수로 관리
+  const cylH2   = makeCylTile('H₂ 공업용','var(--accent2)','47L/130bar','H2_industrial',h2KgPerBtl)
+                + makeCylTile('H₂ 고순도','#7ee8fa',       '47L/130bar','H2_pure',       h2KgPerBtl);
+  const cylO2   = makeCylTile('O₂ 공업용','var(--warn)',   '47L/130bar','O2_industrial', o2KgPerBtl)
+                + makeCylTile('O₂ 고순도','#f9a03f',       '47L/130bar','O2_pure',       o2KgPerBtl);
+  const cylCO2  = makeCylTile('CO₂ 공업용','var(--teal)',  '20kg/병',  'CO2_industrial',co2KgPerBtl)
+                + makeCylTile('CO₂ 고순도','#56d364',      '20kg/병',  'CO2_pure',      co2KgPerBtl);
+
+  const ch4cur = rawMaterials.CH4 || { btl:0, kg:0, empty:0 };
+  const ch4Avail = ch4cur.btl*ch4KgPerBtl + (ch4cur.kg||0);
+  const ch4Pct = ch4cur.btl>0 ? Math.min(100, Math.round(ch4Avail/(ch4KgPerBtl*ch4cur.btl)*100)) : 0;
+  const ch4Bar = ch4Pct>=40?'#39d353':ch4Pct>=15?'#d29922':'#f85149';
+  const tileCH4 = `<div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:12px 16px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+      <span style="font-size:11px;font-weight:700;color:var(--purple);letter-spacing:.06em">CH₄ (메탄)</span>
+      <span style="font-size:10px;color:var(--text3)">47L/130bar</span>
+    </div>
+    <div style="display:flex;align-items:baseline;gap:6px;margin-bottom:2px">
+      <span style="font-family:var(--mono);font-size:22px;font-weight:700;color:var(--purple)">${ch4cur.btl}</span>
+      <span style="font-size:11px;color:var(--text3)">실병</span>
+      <span style="font-size:11px;color:var(--danger);margin-left:8px;font-family:var(--mono)">${ch4cur.empty||0}</span>
+      <span style="font-size:11px;color:var(--danger)">공병</span>
+    </div>
+    <div style="font-size:10px;color:var(--text3);margin-bottom:5px">≈ ${ch4Avail.toFixed(2)} kg (1병=${ch4KgPerBtl.toFixed(2)}kg)</div>
+    <div style="height:4px;background:var(--bg4);border-radius:2px">
+      <div style="height:4px;width:${ch4Pct}%;background:${ch4Bar};border-radius:2px;transition:width .3s"></div>
+    </div>
+  </div>
+  <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:12px 16px;opacity:0.3"></div>`;
+
+  // 순서: 1줄 He ISO/카트리지, 2줄 N2/Ar, 3줄 H2공업/고순도, 4줄 O2공업/고순도, 5줄 CO2공업/고순도, 6줄 CH4/(빈칸)
+  wrap.innerHTML = tileIsoTank + tileCart + bulkTiles + cylH2 + cylO2 + cylCO2 + tileCH4;
 }
 
 function renderCylRawTiles() {
@@ -5956,7 +6046,7 @@ function renderCylRawTiles() {
     { label:'H₂ 고순도', color:'#7ee8fa',        btl:h2p.btl, kgAvail:h2p.btl*h2KgPerBtl+h2p.kg, kgPerBtl:h2KgPerBtl, unit:'47L/130bar', wasteKg:wasteH2 },
     { label:'O₂ 공업용', color:'var(--warn)',     btl:o2i.btl, kgAvail:o2i.btl*o2KgPerBtl+o2i.kg, kgPerBtl:o2KgPerBtl, unit:'47L/130bar', wasteKg:wasteO2 },
     { label:'O₂ 고순도', color:'#f9a03f',         btl:o2p.btl, kgAvail:o2p.btl*o2KgPerBtl+o2p.kg, kgPerBtl:o2KgPerBtl, unit:'47L/130bar', wasteKg:wasteO2 },
-    { label:'CO₂',       color:'var(--teal)',     btl:Math.floor(co2Btl), kgAvail:co2Kg, kgPerBtl:CO2_KG_PER_BTL, unit:'20kg/병', wasteKg:CO2_WASTE_KG },
+    { label:'CO₂ (이산화탄소)', color:'var(--teal)',     btl:Math.floor(co2Btl), kgAvail:co2Kg, kgPerBtl:CO2_KG_PER_BTL, unit:'20kg/병', wasteKg:CO2_WASTE_KG },
     { label:'CH₄ (메탄)', color:'var(--purple)',  btl:ch4.btl, kgAvail:ch4.btl*ch4KgPerBtl+ch4.kg, kgPerBtl:ch4KgPerBtl, unit:'47L/130bar', wasteKg:wasteCH4 },
   ];
 
@@ -7359,7 +7449,7 @@ function addIncMixGroup() {
   // 성분 각인 레이블
   const lbl = document.createElement('div');
   lbl.style.cssText = 'font-size:11px;font-weight:700;color:var(--text3);letter-spacing:.06em;margin-bottom:10px';
-  lbl.textContent = '각인 성분 (최대 3개) — 농도 없이 성분명만 선택';
+  lbl.textContent = '각인 성분 — 농도 없이 성분명만 선택';
   wrap.appendChild(lbl);
 
   // 성분 행 컨테이너
@@ -7391,9 +7481,6 @@ function addIncMixGroup() {
 }
 
 function incAddCompRow(group) {
-  const rows = group.querySelectorAll('.mix-comp-row');
-  if (rows.length >= 3) { alert('성분은 최대 3개입니다.'); return; }
-
   const compRows = group.querySelector('.inc-mix-comp-rows');
   const row = document.createElement('div');
   row.className = 'mix-comp-row';
@@ -7819,17 +7906,18 @@ function toggleAnOnlyUnset() {
 }
 
 function loadAnLots() {
-  const gasF = document.getElementById('anGas').value;
-  const from = document.getElementById('anFrom').value;
-  const to   = document.getElementById('anTo').value;
+  const gasF    = document.getElementById('anGas').value;
+  const from    = document.getElementById('anFrom').value;
+  const to      = document.getElementById('anTo').value;
+  const lotSearch = (document.getElementById('anLotSearch')?.value || '').trim().toLowerCase();
 
-  // 생산 이력에서 LOT 단위로 집계 (Balloon, 공업용 제외)
   const SKIP_AN_GASES = ['He — Balloon', 'He — 공업용', 'N₂ — 공업용', 'Ar — 공업용', 'Air — 공업용'];
   const lotMap = {};
   logs.filter(l => l.type==='produce' && l.lotNo && !SKIP_AN_GASES.includes(l.gas)).forEach(l => {
     if (gasF && l.gas !== gasF) return;
     if (from && l.date < from) return;
     if (to   && l.date > to)   return;
+    if (lotSearch && !l.lotNo.toLowerCase().includes(lotSearch)) return;
     if (!lotMap[l.lotNo]) {
       lotMap[l.lotNo] = { lotNo:l.lotNo, gas:l.gas, size:l.size, company:l.company, date:l.date, qty:0 };
     }
@@ -10846,7 +10934,7 @@ function resetAll() {
   });
   inventory = []; logs = []; cartridges = []; cartLogs = []; clients = [];
   orders = []; analysisData = []; incomingLogs = []; expireSettings = [];
-  rawMaterials = { He:{tank_kg:0,cart_m3:0}, N2:0, Ar:0, H2_industrial:{btl:0,kg:0}, H2_pure:{btl:0,kg:0}, O2_industrial:{btl:0,kg:0}, O2_pure:{btl:0,kg:0}, CO2:0, CH4:{btl:0,kg:0} };
+  rawMaterials = { He:{tank_kg:0,cart_m3:0}, N2:0, Ar:0, H2_industrial:{btl:0,kg:0,empty:0}, H2_pure:{btl:0,kg:0,empty:0}, O2_industrial:{btl:0,kg:0,empty:0}, O2_pure:{btl:0,kg:0,empty:0}, CO2_industrial:{btl:0,kg:0,empty:0}, CO2_pure:{btl:0,kg:0,empty:0}, CH4:{btl:0,kg:0,empty:0} };
   renderAll();
   renderClientList();
   alert('✅ 초기화 완료');
