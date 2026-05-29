@@ -7493,33 +7493,6 @@ function loadAnLots() {
   }).join('');
 }
 
-  if (!lots.length) {
-    tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--text3);padding:20px">생산 이력이 없습니다</td></tr>`;
-    return;
-  }
-
-  tbody.innerHTML = lots.map(lot => {
-    const done = analysisData.find(a => a.lotNo === lot.lotNo);
-    const statusBadge = done
-      ? `<span class="tag tag-full">분석완료</span>`
-      : `<span class="tag" style="background:rgba(210,153,34,.15);color:var(--warn)">미입력</span>`;
-    return `<tr>
-      <td style="font-family:var(--mono);font-size:12px;color:var(--accent)">${lot.lotNo}</td>
-      <td style="font-family:var(--mono);font-size:12px">${lot.date}</td>
-      <td style="font-size:12px">${lot.gas}</td>
-      <td style="font-family:var(--mono);font-size:12px">${lot.size}</td>
-      <td style="font-size:12px">${lot.company}</td>
-      <td class="num">${lot.qty}</td>
-      <td>${statusBadge}</td>
-      <td>
-        <button class="btn btn-sm btn-primary" onclick="openAnForm('${lot.lotNo.replace(/'/g,"\\'")}')">
-          ${done ? '수정' : '입력'}
-        </button>
-      </td>
-    </tr>`;
-  }).join('');
-}
-
 function calcAnExpire() {
   const dateVal = document.getElementById('anAnalysisDate').value;
   const months  = parseInt(document.getElementById('anExpireMonths').value) || 12;
