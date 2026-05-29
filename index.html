@@ -1533,9 +1533,13 @@ console.log('✅ Firebase 초기화 완료');
     <div class="flex-gap" style="gap:10px;flex-wrap:wrap;margin-bottom:12px">
       <div class="field">
         <label>가스 품목</label>
-        <select id="anGas" onchange="loadAnLots()" style="width:180px">
+        <select id="anGas" style="width:180px">
           <option value="">전체</option>
         </select>
+      </div>
+      <div class="field">
+        <label>LOT 번호</label>
+        <input type="text" id="anLotSearch" placeholder="LOT 검색..." style="width:160px" onkeydown="if(event.key==='Enter') loadAnLots()">
       </div>
       <div class="field">
         <label>기간</label>
@@ -1545,8 +1549,11 @@ console.log('✅ Firebase 초기화 완료');
           <input type="date" id="anTo" style="width:150px">
         </div>
       </div>
-      <div style="margin-top:18px">
+      <div style="margin-top:18px;display:flex;gap:6px">
         <button class="btn btn-primary" onclick="loadAnLots()">조회</button>
+        <button id="anOnlyUnset" class="btn btn-sm"
+          style="background:rgba(210,153,34,.2);border:1px solid var(--warn);color:var(--warn);font-size:12px"
+          onclick="toggleAnOnlyUnset()">📋 전체 보기</button>
       </div>
     </div>
     <div class="tbl-wrap">
@@ -1834,6 +1841,10 @@ console.log('✅ Firebase 초기화 완료');
           <option value="ship">출고</option>
           <option value="adjust">조정</option>
         </select>
+      </div>
+      <div class="field">
+        <label>LOT 번호</label>
+        <input type="text" id="hLotSearch" placeholder="LOT 검색..." style="width:160px" onkeydown="if(event.key==='Enter') renderHist()">
       </div>
       <div style="margin-top:18px"><button class="btn btn-primary" onclick="renderHist()">조회</button></div>
     </div>
@@ -4999,16 +5010,18 @@ function populateHistFilters() {
 }
 
 function renderHist() {
-  const from  = document.getElementById('hFrom').value;
-  const to    = document.getElementById('hTo').value;
-  const gasF  = document.getElementById('hGas').value;
-  const typeF = document.getElementById('hType').value;
+  const from      = document.getElementById('hFrom').value;
+  const to        = document.getElementById('hTo').value;
+  const gasF      = document.getElementById('hGas').value;
+  const typeF     = document.getElementById('hType').value;
+  const lotSearch = (document.getElementById('hLotSearch')?.value || '').trim().toLowerCase();
 
   let rows = logs.filter(l =>
     (!from || l.date >= from) &&
     (!to   || l.date <= to) &&
     (!gasF || l.gas === gasF) &&
-    (!typeF || l.type === typeF)
+    (!typeF || l.type === typeF) &&
+    (!lotSearch || (l.lotNo||'').toLowerCase().includes(lotSearch) || (l.memo||'').toLowerCase().includes(lotSearch))
   ).slice().sort((a,b) => {
     const da = (a.date||'') + ' ' + (a.time||'');
     const db2 = (b.date||'') + ' ' + (b.time||'');
@@ -7406,17 +7419,38 @@ function initAnalysisPage() {
   renderAnHist();
 }
 
-function loadAnLots() {
-  const gasF = document.getElementById('anGas').value;
-  const from = document.getElementById('anFrom').value;
-  const to   = document.getElementById('anTo').value;
+let anOnlyUnset = true; // 기본: 미입력만 보기
 
-  // 생산 이력에서 LOT 단위로 집계
+function toggleAnOnlyUnset() {
+  anOnlyUnset = !anOnlyUnset;
+  const btn = document.getElementById('anOnlyUnset');
+  if (anOnlyUnset) {
+    btn.style.background = 'rgba(210,153,34,.2)';
+    btn.style.borderColor = 'var(--warn)';
+    btn.style.color = 'var(--warn)';
+    btn.textContent = '📋 전체 보기';
+  } else {
+    btn.style.background = 'var(--bg3)';
+    btn.style.borderColor = 'var(--border)';
+    btn.style.color = 'var(--text2)';
+    btn.textContent = '⚠️ 미입력만';
+  }
+  loadAnLots();
+}
+
+function loadAnLots() {
+  const gasF      = document.getElementById('anGas').value;
+  const from      = document.getElementById('anFrom').value;
+  const to        = document.getElementById('anTo').value;
+  const lotSearch = (document.getElementById('anLotSearch')?.value || '').trim().toLowerCase();
+
+  const SKIP_AN_GASES = ['He — Balloon','He — 공업용','N₂ — 공업용','Ar — 공업용','Air — 공업용'];
   const lotMap = {};
-  logs.filter(l => l.type==='produce' && l.lotNo).forEach(l => {
+  logs.filter(l => l.type==='produce' && l.lotNo && !SKIP_AN_GASES.includes(l.gas)).forEach(l => {
     if (gasF && l.gas !== gasF) return;
     if (from && l.date < from) return;
     if (to   && l.date > to)   return;
+    if (lotSearch && !l.lotNo.toLowerCase().includes(lotSearch)) return;
     if (!lotMap[l.lotNo]) {
       lotMap[l.lotNo] = { lotNo:l.lotNo, gas:l.gas, size:l.size, company:l.company, date:l.date, qty:0 };
     }
@@ -7424,7 +7458,40 @@ function loadAnLots() {
   });
 
   const tbody = document.getElementById('anLotBody');
-  const lots  = Object.values(lotMap).sort((a,b)=>b.date.localeCompare(a.date));
+  let lots = Object.values(lotMap).sort((a,b)=>b.date.localeCompare(a.date));
+
+  // 미입력만 필터
+  if (anOnlyUnset) lots = lots.filter(lot => !analysisData.find(a => a.lotNo === lot.lotNo));
+
+  if (!lots.length) {
+    const msg = anOnlyUnset
+      ? `<tr><td colspan="8" style="text-align:center;color:var(--accent);padding:20px">✅ 미입력 LOT가 없습니다!</td></tr>`
+      : `<tr><td colspan="8" style="text-align:center;color:var(--text3);padding:20px">생산 이력이 없습니다</td></tr>`;
+    tbody.innerHTML = msg;
+    return;
+  }
+
+  tbody.innerHTML = lots.map(lot => {
+    const done = analysisData.find(a => a.lotNo === lot.lotNo);
+    const statusBadge = done
+      ? `<span class="tag tag-full">분석완료</span>`
+      : `<span class="tag" style="background:rgba(210,153,34,.15);color:var(--warn)">미입력</span>`;
+    return `<tr>
+      <td style="font-family:var(--mono);font-size:12px;color:var(--accent)">${lot.lotNo}</td>
+      <td style="font-family:var(--mono);font-size:12px">${lot.date}</td>
+      <td style="font-size:12px">${lot.gas}</td>
+      <td style="font-family:var(--mono);font-size:12px">${lot.size}</td>
+      <td style="font-size:12px">${lot.company}</td>
+      <td class="num">${lot.qty}</td>
+      <td>${statusBadge}</td>
+      <td>
+        <button class="btn btn-sm btn-primary" onclick="openAnForm('${lot.lotNo.replace(/'/g,"\\'")}')">
+          ${done ? '수정' : '입력'}
+        </button>
+      </td>
+    </tr>`;
+  }).join('');
+}
 
   if (!lots.length) {
     tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--text3);padding:20px">생산 이력이 없습니다</td></tr>`;
@@ -8247,6 +8314,27 @@ function coordToRC(coord) {
 }
 
 // xlsx(zip) XML 직접 수정 → 이미지/병합/서식 100% 보존
+// SVG 문자열 → PNG DataURL 변환 (Canvas 이용)
+function svgToDataUrl(svgStr, w, h) {
+  return new Promise((resolve, reject) => {
+    const blob = new Blob([svgStr], { type: 'image/svg+xml;charset=utf-8' });
+    const url  = URL.createObjectURL(blob);
+    const img  = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width  = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, w, h);
+      ctx.drawImage(img, 0, 0, w, h);
+      URL.revokeObjectURL(url);
+      resolve(canvas.toDataURL('image/png'));
+    };
+    img.onerror = (e) => { URL.revokeObjectURL(url); reject(e); };
+    img.src = url;
+  });
+}
+
 async function generateCertExcel(entry, company, issueDate, selectedCyls, valveType, fillPressure) {
   if (typeof JSZip === 'undefined') {
     alert('JSZip 라이브러리가 로드되지 않았습니다. 잠시 후 다시 시도해주세요.');
@@ -8818,69 +8906,66 @@ async function generateCertExcel(entry, company, issueDate, selectedCyls, valveT
   // calcChain 제거 (수식 캐시 — 없애야 엑셀이 재계산)
   zip.remove('xl/calcChain.xml');
 
-  // ══════════════ 서명 이미지 삽입 ══════════════
-  // 1) 분석자 이름과 매칭되는 서명 찾기
-  let sigDataUrl = null;
-  if (entry.analyst && Array.isArray(signatures)) {
-    const sig = signatures.find(s => s.name === entry.analyst);
-    if (sig && sig.dataUrl) sigDataUrl = sig.dataUrl;
-  }
-
-  if (sigDataUrl) {
+  // ══════════════ 도장 자동 생성 (이름+"인" 2줄 빨간 원형) ══════════════
+  if (entry.analyst) {
     try {
-      // dataUrl 파싱
-      const dataUrlMatch = sigDataUrl.match(/^data:image\/(png|jpeg|jpg);base64,(.+)$/);
-      if (!dataUrlMatch) throw new Error('지원하지 않는 이미지 포맷');
-      const imgFormat = dataUrlMatch[1] === 'jpg' ? 'jpeg' : dataUrlMatch[1];
-      const fileExt   = imgFormat === 'jpeg' ? 'jpg' : 'png';
-      const b64data   = dataUrlMatch[2];
-      const binary    = atob(b64data);
-      const bytes     = new Uint8Array(binary.length);
+      const name     = entry.analyst;
+      const fullText = name + '인';
+      const half     = Math.ceil(fullText.length / 2);
+      const line1    = fullText.slice(0, half);
+      const line2    = fullText.slice(half);
+      const fontSize = fullText.length <= 4 ? 36 : 30;
+
+      const stampSvg = [
+        '<svg xmlns="http://www.w3.org/2000/svg" width="160" height="160" viewBox="0 0 160 160">',
+        '<circle cx="80" cy="80" r="74" fill="none" stroke="#cc0000" stroke-width="7"/>',
+        '<circle cx="80" cy="80" r="65" fill="none" stroke="#cc0000" stroke-width="2"/>',
+        '<text x="80" y="72" text-anchor="middle"',
+        ' font-family="Malgun Gothic,Apple SD Gothic Neo,NanumGothic,sans-serif"',
+        ' font-size="' + fontSize + '" font-weight="bold" fill="#cc0000" letter-spacing="4">' + line1 + '</text>',
+        line2 ? '<text x="80" y="' + (72 + fontSize + 6) + '" text-anchor="middle"' +
+          ' font-family="Malgun Gothic,Apple SD Gothic Neo,NanumGothic,sans-serif"' +
+          ' font-size="' + fontSize + '" font-weight="bold" fill="#cc0000" letter-spacing="4">' + line2 + '</text>' : '',
+        '</svg>'
+      ].join('');
+
+      // SVG → PNG (Canvas)
+      const stampDataUrl = await svgToDataUrl(stampSvg, 160, 160);
+      const dataUrlMatch = stampDataUrl.match(/^data:image\/(png);base64,(.+)$/);
+      if (!dataUrlMatch) throw new Error('도장 변환 실패');
+
+      const b64data = dataUrlMatch[2];
+      const binary  = atob(b64data);
+      const bytes   = new Uint8Array(binary.length);
       for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
 
-      // 2) 서명 이미지 파일 추가 (기존 image1~3과 충돌 안 나게 sig.png)
-      const sigFileName = `sig.${fileExt}`;
-      zip.file(`xl/media/${sigFileName}`, bytes);
+      zip.file('xl/media/stamp.png', bytes);
 
-      // 3) drawing1.xml.rels에 서명 이미지 관계 추가
+      // drawing1.xml.rels
       let drawRelsXml = await zip.file('xl/drawings/_rels/drawing1.xml.rels').async('string');
-      // 기존 rId 최대값 찾기
       const ridMatches = [...drawRelsXml.matchAll(/Id="rId(\d+)"/g)];
       const maxRid = ridMatches.length ? Math.max(...ridMatches.map(m => parseInt(m[1]))) : 0;
       const sigRid = `rId${maxRid + 1}`;
-      // 기존 sig 관계가 있으면 제거
-      drawRelsXml = drawRelsXml.replace(/<Relationship[^/]*Target="\.\.\/media\/sig\.[^"]*"[^/]*\/>/g, '');
-      // 새 관계 추가
+      drawRelsXml = drawRelsXml.replace(/<Relationship[^/]*Target="\.\.\/media\/stamp\.png"[^/]*\/>/g, '');
       drawRelsXml = drawRelsXml.replace(
         '</Relationships>',
-        `<Relationship Id="${sigRid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/${sigFileName}"/></Relationships>`
+        `<Relationship Id="${sigRid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/stamp.png"/></Relationships>`
       );
       zip.file('xl/drawings/_rels/drawing1.xml.rels', drawRelsXml);
 
-      // 4) drawing1.xml에 서명 picture anchor 추가
+      // drawing1.xml - oneCellAnchor (U39 기준)
       let drawingXml = await zip.file('xl/drawings/drawing1.xml').async('string');
-      // 기존 sig anchor가 있으면 제거 (재발행 대비)
       drawingXml = drawingXml.replace(/<xdr:oneCellAnchor>(?:(?!<\/xdr:oneCellAnchor>)[\s\S])*?name="Signature"[\s\S]*?<\/xdr:oneCellAnchor>/g, '');
       drawingXml = drawingXml.replace(/<xdr:twoCellAnchor[^>]*>(?:(?!<\/xdr:twoCellAnchor>)[\s\S])*?name="Signature"[\s\S]*?<\/xdr:twoCellAnchor>/g, '');
 
-      // 서명 위치: 분석자 이름 바로 옆 (P41 또는 P39 옆 → Q열 시작)
-      // PURE: P41 → row=40 (0-indexed), MIX: P39 → row=38
-      // 셀 좌표: 0-indexed col, row
-      const sigRowZ = isMix ? 38 : 40;          // 분석자 이름 행 (0-indexed)
-      const sigColZ = 16;                        // Q열 (A=0, B=1, ... P=15, Q=16)
-
-      // EMU 단위 (1cm ≈ 360000 EMU)
-      // 도장 크기: 약 1.6cm × 1.6cm
-      const sigW = 580000;
-      const sigH = 580000;
-      // 셀 안에서 위/왼쪽 offset
-      const offsetX = 30000;   // 살짝 오른쪽
-      const offsetY = -50000;  // 약간 위로 (가운데 정렬)
-
+      const sigRowZ = analystRow - 1; // 0-indexed
+      const sigColZ = 20;             // U열
+      const stampSize = 570000;       // EMU (약 1.6cm)
       const sigUid = Date.now();
+
       const newAnchor = `<xdr:oneCellAnchor>
-<xdr:from><xdr:col>${sigColZ}</xdr:col><xdr:colOff>${offsetX}</xdr:colOff><xdr:row>${sigRowZ}</xdr:row><xdr:rowOff>${offsetY}</xdr:rowOff></xdr:from>
-<xdr:ext cx="${sigW}" cy="${sigH}"/>
+<xdr:from><xdr:col>${sigColZ}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${sigRowZ}</xdr:row><xdr:rowOff>50000</xdr:rowOff></xdr:from>
+<xdr:ext cx="${stampSize}" cy="${stampSize}"/>
 <xdr:pic>
 <xdr:nvPicPr>
 <xdr:cNvPr id="${sigUid}" name="Signature"/>
@@ -8897,24 +8982,19 @@ async function generateCertExcel(entry, company, issueDate, selectedCyls, valveT
 <xdr:clientData/>
 </xdr:oneCellAnchor>`;
 
-      // </xdr:wsDr> 직전에 삽입
       drawingXml = drawingXml.replace('</xdr:wsDr>', newAnchor + '</xdr:wsDr>');
       zip.file('xl/drawings/drawing1.xml', drawingXml);
 
-      // 5) [Content_Types].xml에 이미지 확장자 등록 (가장 중요!)
+      // [Content_Types].xml
       let ctXml = await zip.file('[Content_Types].xml').async('string');
-      // png 또는 jpg Default Extension이 없으면 추가
-      if (!new RegExp(`<Default Extension="${fileExt}"`).test(ctXml)) {
-        ctXml = ctXml.replace(
-          /(<Types[^>]*>)/,
-          `$1<Default Extension="${fileExt}" ContentType="image/${imgFormat}"/>`
-        );
+      if (!/<Default Extension="png"/.test(ctXml)) {
+        ctXml = ctXml.replace(/(<Types[^>]*>)/, '$1<Default Extension="png" ContentType="image/png"/>');
         zip.file('[Content_Types].xml', ctXml);
       }
 
-      console.log('[성적서] 서명 삽입 완료:', entry.analyst, sigFileName, sigRid);
-    } catch (sigErr) {
-      console.warn('[성적서] 서명 이미지 삽입 실패 (성적서는 정상 발행):', sigErr);
+      console.log('[성적서] 도장 삽입 완료:', fullText);
+    } catch (stampErr) {
+      console.warn('[성적서] 도장 삽입 실패 (성적서는 정상 발행):', stampErr);
     }
   }
 
