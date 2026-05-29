@@ -69,9 +69,9 @@
   .tile-sub { font-size: 11px; color: var(--text3); margin-top: 2px; }
 
   /* ── Table ── */
-  .tbl-wrap { overflow-x: auto; }
+  .tbl-wrap { overflow-x: auto; overflow-y: auto; max-height: 420px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th { text-align: left; padding: 8px 12px; font-size: 11px; color: var(--text3); font-weight: 700; letter-spacing: 0.06em; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { text-align: left; padding: 8px 12px; font-size: 11px; color: var(--text3); font-weight: 700; letter-spacing: 0.06em; border-bottom: 1px solid var(--border); white-space: nowrap; position: sticky; top: 0; background: var(--bg2); z-index: 1; }
   td { padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; white-space: nowrap; }
   tr:last-child td { border-bottom: none; }
   tr:hover td { background: var(--bg3); }
@@ -1612,7 +1612,9 @@ console.log('✅ Firebase 초기화 완료');
       </div>
       <div class="field">
         <label>분석자</label>
-        <input type="text" id="anAnalyst" placeholder="이름">
+        <select id="anAnalyst" style="width:100%">
+          <option value="">선택</option>
+        </select>
       </div>
     </div>
 
@@ -5007,7 +5009,11 @@ function renderHist() {
     (!to   || l.date <= to) &&
     (!gasF || l.gas === gasF) &&
     (!typeF || l.type === typeF)
-  ).slice().reverse();
+  ).slice().sort((a,b) => {
+    const da = (a.date||'') + ' ' + (a.time||'');
+    const db2 = (b.date||'') + ' ' + (b.time||'');
+    return db2.localeCompare(da); // 최신순
+  });
 
   const tbody = document.getElementById('histBody');
   if (!rows.length) {
@@ -6804,7 +6810,10 @@ function renderOrderHist() {
   const filter = document.getElementById('ordHistFilter')?.value || '';
   const wrap   = document.getElementById('ordHistBody');
 
-  const filtered = orders.filter(o => !filter || o.status === filter).slice().reverse();
+  const filtered = orders
+    .filter(o => !filter || o.status === filter)
+    .slice()
+    .sort((a,b) => (b.date||b.createdAt||'').localeCompare(a.date||a.createdAt||''));
   if (!filtered.length) {
     wrap.innerHTML = '<p style="color:var(--text3);font-size:13px;text-align:center;padding:20px 0">저장된 발주가 없습니다</p>';
     return;
@@ -7689,10 +7698,18 @@ function openAnForm(lotNo) {
   const existing = analysisData.find(a => a.lotNo === lotNo);
   const analysisDate = existing?.analysisDate || today();
   document.getElementById('anAnalysisDate').value  = analysisDate;
-  // 품목별 유효기간 자동 적용 (기존 저장값 있으면 그거 우선)
   document.getElementById('anExpireMonths').value  = existing?.expireMonths || getExpireMonths(first.gas);
-  document.getElementById('anAnalyst').value       = existing?.analyst || '';
-  document.getElementById('anMemo').value          = existing?.memo || '';
+
+  // 분석자 드롭다운 — isAnalyst 또는 admin 권한 있는 사람만
+  const analystSel = document.getElementById('anAnalyst');
+  const analysts = users.filter(u => u.isAnalyst || u.role === 'admin');
+  analystSel.innerHTML = '<option value="">선택</option>' +
+    analysts.map(u => `<option value="${u.name}" ${u.name === (existing?.analyst||'') ? 'selected' : ''}>${u.name}</option>`).join('');
+  if (!analysts.length) {
+    analystSel.innerHTML = '<option value="">분석자 지정 필요 (관리자 탭)</option>';
+  }
+
+  document.getElementById('anMemo').value = existing?.memo || '';
 
   // 만료일 계산 — 항상 분석일 + 개월수 - 1일로 재계산 (기존 잘못된 값 덮어쓰기)
   calcAnExpire();
@@ -7882,6 +7899,13 @@ function renderAnHist() {
     return true;
   });
 
+  // 날짜 최신순 정렬
+  filtered = filtered.slice().sort((a,b) => {
+    const da = a.analysisDate || a.date || '';
+    const db2 = b.analysisDate || b.date || '';
+    return db2.localeCompare(da);
+  });
+
   // 카운터 표시
   const countEl = document.getElementById('anHistCount');
   if (countEl) {
@@ -7899,7 +7923,7 @@ function renderAnHist() {
     return;
   }
 
-  wrap.innerHTML = filtered.slice().reverse().map(a => {
+  wrap.innerHTML = filtered.map(a => {
     const allPass = a.items.every(i => i.pass !== false);
     const hasFail = a.items.some(i => i.pass === false);
     const badge   = hasFail
@@ -9969,7 +9993,11 @@ function renderAdminLog() {
     (!to   || l.date <= to) &&
     (!type || l.type === type) &&
     (!lot  || (l.lotNo||'').toLowerCase().includes(lot))
-  ).slice().reverse();
+  ).slice().sort((a,b) => {
+    const da = (a.date||'') + ' ' + (a.time||'');
+    const db2 = (b.date||'') + ' ' + (b.time||'');
+    return db2.localeCompare(da); // 최신순
+  });
 
   const tbody = document.getElementById('adminLogBody');
   if (!rows.length) {
