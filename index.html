@@ -2535,7 +2535,7 @@ window.onFsUpdate = function(key, val) {
     case STORE_KEY_EXPIRE:   expireSettings = val; break;
     case STORE_KEY_CART:     cartridges     = val; break;
     case STORE_KEY_CART_LOG: cartLogs       = val; break;
-    case STORE_KEY_ANALYSIS: analysisData   = val; break;
+    case STORE_KEY_ANALYSIS: analysisData = val; migrateAnalysisData(); break;
     case STORE_KEY_INCOMING: incomingLogs   = val; break;
     case STORE_KEY_ORDERS:   orders         = val; break;
     case STORE_KEY_USERS:    users          = val; renderUserList && renderUserList(); break;
@@ -7878,6 +7878,32 @@ function updateAnContPass(inp) {
   passEl.style.color = pass?'var(--accent)':'var(--danger)';
 }
 
+// 기존 analysisData에서 value가 0인 항목 자동 정리
+function migrateAnalysisData() {
+  let changed = false;
+  analysisData = analysisData.map(entry => {
+    if (!entry.items?.length) return entry;
+    const cleaned = entry.items.filter(i => {
+      if (!i.name) return false;
+      const v = String(i.value || '').trim().toLowerCase();
+      if (v === 'balance') return true;
+      if (v === '') return true; // 빈칸은 유지 (직접 기입용)
+      const num = parseFloat(v);
+      if (!isNaN(num) && num === 0) return false; // 0이면 제거
+      return true;
+    });
+    if (cleaned.length !== entry.items.length) {
+      changed = true;
+      return { ...entry, items: cleaned };
+    }
+    return entry;
+  });
+  if (changed) {
+    save(STORE_KEY_ANALYSIS, analysisData);
+    console.log('[마이그레이션] 분析치 0% 항목 정리 완료');
+  }
+}
+
 function saveAnalysis() {
   if (!currentAnLog) return;
   const analysisDate  = document.getElementById('anAnalysisDate').value;
@@ -7888,7 +7914,7 @@ function saveAnalysis() {
 
   if (!analysisDate) { alert('분석일자를 입력해주세요.'); return; }
 
-  // LOT 대표 분석 항목
+  // LOT 대표 분석 항목 — value가 0이거나 빈 항목 자동 제거 (balance 제외)
   const items = [...document.querySelectorAll('#anItemBody tr')].map(tr => ({
     name:  tr.querySelector('.an-name')?.value.trim()  || '',
     value: tr.querySelector('.an-value')?.value.trim() || '',
@@ -7896,7 +7922,14 @@ function saveAnalysis() {
     spec:  tr.querySelector('.an-spec')?.value.trim()  || '',
     pass:  tr.querySelector('.an-pass')?.textContent==='PASS' ? true
          : tr.querySelector('.an-pass')?.textContent==='FAIL' ? false : null
-  })).filter(i => i.name);
+  })).filter(i => {
+    if (!i.name) return false;
+    const v = i.value.toLowerCase();
+    if (v === 'balance') return true; // balance는 유지
+    const num = parseFloat(v);
+    if (!isNaN(num) && num === 0) return false; // 0이면 제거
+    return true;
+  });
 
   if (!items.length) { alert('분석 항목을 1개 이상 입력해주세요.'); return; }
 
@@ -8814,23 +8847,17 @@ async function generateCertExcel(entry, company, issueDate, selectedCyls, valveT
       cells[`A${rowNum}`] = { t:'s', v: addShared(item.name || '') };
 
       if (rowNum === 21) {
-        // Row 21 — 주성분 (양식이 0.000% 포맷이라 /100 처리, 자릿수는 양식이 결정)
+        // Row 21 — 주성분 순도: 텍스트로 "99.999 %" 형태로 직접 삽입
         if (specStr) {
           const specNum = parseFloat(specStr);
           if (!isNaN(specNum)) {
-            cells['M21'] = { t:'n', v: isPercent ? specNum / 100 : specNum };
+            const fixed = formatMin1Decimal(specNum);
+            cells['M21'] = { t:'s', v: addShared(isPercent ? `${fixed} %` : fixed) };
           } else {
             cells['M21'] = { t:'s', v: addShared(specStr) };
           }
         }
-        if (valStr) {
-          const num = parseFloat(valStr);
-          if (!isNaN(num)) {
-            cells['Y21'] = { t:'n', v: isPercent ? num / 100 : num };
-          } else {
-            cells['Y21'] = { t:'s', v: addShared(valStr) };
-          }
-        }
+        // Y21 (분析치)은 빈칸으로 두고 직접 기입
       } else {
         // Row 22~25 — 큰 병합셀 (M:X, Y:AJ), 소수점 최소 1자리
         if (specStr) {
