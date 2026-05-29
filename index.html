@@ -206,20 +206,32 @@ const FS_KEYS = [
 ];
 
 // 리스너는 앱 초기화 완료 후 등록 (window.gasImsReady 이벤트 대기)
-window.addEventListener('gasImsReady', () => {
+const _unsubscribes = [];
+
+function _subscribe() {
+  // 기존 리스너 해제
+  _unsubscribes.forEach(fn => { try { fn(); } catch(e) {} });
+  _unsubscribes.length = 0;
+
   FS_KEYS.forEach(key => {
-    onSnapshot(doc(db, FS_COL, key), snap => {
+    const unsub = onSnapshot(doc(db, FS_COL, key), snap => {
       if (!snap.exists()) return;
       const val = snap.data().data;
       localStorage.setItem(key, JSON.stringify(val));
       window.onFsUpdate && window.onFsUpdate(key, val);
     }, err => {
-      console.warn('Firebase 리스너 에러:', err.code, '— 5초 후 재시도');
-      setTimeout(() => window._resubscribe && window._resubscribe(), 5000);
+      console.warn('Firebase 리스너 에러:', err.code, '— 3초 후 재구독');
+      setTimeout(_subscribe, 3000);
     });
+    _unsubscribes.push(unsub);
   });
+  console.log('✅ Firebase 실시간 리스너 등록');
+}
 
-  // 30초마다 강제 동기화 (방화벽 환경 대비)
+window.addEventListener('gasImsReady', () => {
+  _subscribe();
+
+  // 10초마다 강제 동기화 (방화벽 환경 대비)
   setInterval(async () => {
     if (!window.fsLoad) return;
     for (const key of FS_KEYS) {
@@ -228,9 +240,7 @@ window.addEventListener('gasImsReady', () => {
         if (val !== null) window.onFsUpdate && window.onFsUpdate(key, val);
       } catch(e) {}
     }
-  }, 30000);
-
-  console.log('✅ Firebase 실시간 리스너 등록 완료');
+  }, 10000);
 });
 
 // 연결 상태 표시
@@ -8958,8 +8968,8 @@ async function generateCertExcel(entry, company, issueDate, selectedCyls, valveT
       drawingXml = drawingXml.replace(/<xdr:oneCellAnchor>(?:(?!<\/xdr:oneCellAnchor>)[\s\S])*?name="Signature"[\s\S]*?<\/xdr:oneCellAnchor>/g, '');
       drawingXml = drawingXml.replace(/<xdr:twoCellAnchor[^>]*>(?:(?!<\/xdr:twoCellAnchor>)[\s\S])*?name="Signature"[\s\S]*?<\/xdr:twoCellAnchor>/g, '');
 
-      const sigRowZ = analystRow - 1; // 0-indexed
-      const sigColZ = 20;             // U열
+      const sigRowZ = analystRow - 2; // 0-indexed (위로 한 칸)
+      const sigColZ = 19;             // T열 (왼쪽 한 칸)
       const stampSize = 570000;       // EMU (약 1.6cm)
       const sigUid = Date.now();
 
