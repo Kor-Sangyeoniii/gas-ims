@@ -162,8 +162,7 @@ const firebaseConfig = {
 
 const fbApp = initializeApp(firebaseConfig);
 const db    = initializeFirestore(fbApp, {
-  experimentalForceLongPolling: true,
-  useFetchStreams: false,
+  experimentalAutoDetectLongPolling: true,
 });
 
 // Firestore 컬렉션명 상수
@@ -171,20 +170,87 @@ const FS_COL = 'gasims';
 
 // ── Firebase save: 키 → Firestore 문서로 저장 (source로 자기 업데이트 구분)
 window.fsSave = async function(key, val) {
+  // REST로도 항상 저장 (SDK 차단 환경 대비) — fetch는 작동 확인됨
+  window.fsSaveREST(key, val);
   try {
-    await setDoc(doc(db, FS_COL, key), { data: val, updatedAt: Date.now(), source: window._clientId || 'unknown' });
+    const sdkPromise = setDoc(doc(db, FS_COL, key), { data: val, updatedAt: Date.now(), source: window._clientId || 'unknown' });
+    const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('sdk-timeout')), 3500));
+    await Promise.race([sdkPromise, timeout]);
   } catch(e) {
-    console.error('fsSave error:', key, e);
+    // SDK 실패해도 REST로 이미 저장됨
   }
 };
 
-// ── Firebase load: Firestore 문서 읽기 (초기 로드용)
+// ── Firestore REST API (SDK 차단 환경 폴백 — fetch는 작동 확인됨)
+const FS_REST_BASE = 'https://firestore.googleapis.com/v1/projects/psg-ph-product-management/databases/(default)/documents/' + FS_COL;
+const FS_API_KEY = 'AIzaSyDYKVytyeP797PVY-3j6j1Q9VxtubRRW_A';
+
+function _toRestValue(v) {
+  if (v === null || v === undefined) return { nullValue: null };
+  if (typeof v === 'boolean') return { booleanValue: v };
+  if (typeof v === 'number') return Number.isInteger(v) ? { integerValue: String(v) } : { doubleValue: v };
+  if (typeof v === 'string') return { stringValue: v };
+  if (Array.isArray(v)) return { arrayValue: { values: v.map(_toRestValue) } };
+  if (typeof v === 'object') {
+    const fields = {};
+    for (const k in v) fields[k] = _toRestValue(v[k]);
+    return { mapValue: { fields } };
+  }
+  return { stringValue: String(v) };
+}
+function _fromRestValue(rv) {
+  if (!rv) return null;
+  if ('nullValue' in rv) return null;
+  if ('booleanValue' in rv) return rv.booleanValue;
+  if ('integerValue' in rv) return parseInt(rv.integerValue);
+  if ('doubleValue' in rv) return rv.doubleValue;
+  if ('stringValue' in rv) return rv.stringValue;
+  if ('arrayValue' in rv) return (rv.arrayValue.values || []).map(_fromRestValue);
+  if ('mapValue' in rv) {
+    const o = {};
+    const f = rv.mapValue.fields || {};
+    for (const k in f) o[k] = _fromRestValue(f[k]);
+    return o;
+  }
+  return null;
+}
+
+window.fsLoadREST = async function(key, def) {
+  try {
+    const res = await fetch(`${FS_REST_BASE}/${key}?key=${FS_API_KEY}`);
+    if (!res.ok) return def;
+    const docJson = await res.json();
+    if (!docJson.fields || !docJson.fields.data) return def;
+    return _fromRestValue(docJson.fields.data);
+  } catch(e) { return def; }
+};
+
+window.fsSaveREST = async function(key, val) {
+  try {
+    const body = { fields: {
+      data: _toRestValue(val),
+      updatedAt: { integerValue: String(Date.now()) },
+      source: { stringValue: window._clientId || 'unknown' }
+    }};
+    await fetch(`${FS_REST_BASE}/${key}?key=${FS_API_KEY}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+  } catch(e) { console.warn('fsSaveREST error:', key, e); }
+};
+
+// ── Firebase load: SDK 우선, 실패 시 REST 폴백
 window.fsLoad = async function(key, def) {
   try {
-    const snap = await getDoc(doc(db, FS_COL, key));
+    const sdkPromise = getDoc(doc(db, FS_COL, key));
+    const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('sdk-timeout')), 3500));
+    const snap = await Promise.race([sdkPromise, timeout]);
     return snap.exists() ? snap.data().data : def;
   } catch(e) {
-    console.warn('fsLoad fallback to localStorage:', key);
+    console.warn('fsLoad SDK 실패, REST 폴백:', key);
+    const restVal = await window.fsLoadREST(key, undefined);
+    if (restVal !== undefined) return restVal;
     try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : def; } catch { return def; }
   }
 };
@@ -235,25 +301,30 @@ function _subscribe() {
 window.addEventListener('gasImsReady', () => {
   _subscribe();
 
-  // 15초마다 강제 동기화 (방화벽 환경 대비)
+  // 10초마다 REST로 강제 동기화 (SDK 차단 환경에서도 작동)
+  const _restTimestamps = {};
   setInterval(async () => {
-    if (!window.fsLoad) return;
     for (const key of FS_KEYS) {
       try {
-        const snap = await getDoc(doc(db, FS_COL, key));
-        if (!snap.exists()) continue;
-        const data = snap.data();
-        if (data.source === _clientId) continue; // 내 데이터면 스킵
-        const val = data.data;
+        const res = await fetch(`${FS_REST_BASE}/${key}?key=${FS_API_KEY}`);
+        if (!res.ok) continue;
+        const docJson = await res.json();
+        if (!docJson.fields || !docJson.fields.data) continue;
+        const updatedAt = docJson.fields.updatedAt ? parseInt(docJson.fields.updatedAt.integerValue) : 0;
+        const source    = docJson.fields.source ? docJson.fields.source.stringValue : '';
+        if (source === _clientId) continue;
+        if (_restTimestamps[key] === updatedAt) continue;
+        const val = _fromRestValue(docJson.fields.data);
         const local = localStorage.getItem(key);
-        // 로컬과 다를 때만 업데이트
+        _restTimestamps[key] = updatedAt;
         if (JSON.stringify(val) !== local) {
           localStorage.setItem(key, JSON.stringify(val));
           window.onFsUpdate && window.onFsUpdate(key, val);
+          window._lastSync = new Date().toLocaleTimeString();
         }
       } catch(e) {}
     }
-  }, 15000);
+  }, 10000);
 });
 
 // 연결 상태 표시
