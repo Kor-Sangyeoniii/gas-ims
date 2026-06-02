@@ -2030,6 +2030,13 @@ console.log('✅ Firebase 초기화 완료');
       </div>
 
       <div id="invEditFinished">
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
+          <label style="font-size:12px;color:var(--text3)">업체별 조회:</label>
+          <select id="invEditCo" style="width:200px" onchange="renderInvEdit()">
+            <option value="">전체 보기</option>
+          </select>
+          <span id="invEditCount" style="font-size:12px;color:var(--text3)"></span>
+        </div>
         <div class="tbl-wrap">
           <table>
             <thead><tr><th>가스</th><th>규격</th><th>업체</th><th style="width:90px">실병</th><th style="width:90px">공병</th><th style="width:70px"></th></tr></thead>
@@ -2561,7 +2568,7 @@ let dashView      = 'total';
 let currentAnLog  = null;
 // ocrParsed 제거됨
 let uploadMode = 'append'; // 'append' | 'replace'
-let incMixGroupId_base = 0;
+let incMixGroupId = 0;
 
 // 전역 상수 목록 (함수보다 앞에 위치)
 const ALL_GAS_LIST = [
@@ -7386,7 +7393,7 @@ function addIncMixGroup() {
   // 성분 각인 레이블
   const lbl = document.createElement('div');
   lbl.style.cssText = 'font-size:11px;font-weight:700;color:var(--text3);letter-spacing:.06em;margin-bottom:10px';
-  lbl.textContent = '각인 성분 (최대 3개) — 농도 없이 성분명만 선택';
+  lbl.textContent = '각인 성분 — 농도 없이 성분명만 선택';
   wrap.appendChild(lbl);
 
   // 성분 행 컨테이너
@@ -7418,9 +7425,6 @@ function addIncMixGroup() {
 }
 
 function incAddCompRow(group) {
-  const rows = group.querySelectorAll('.mix-comp-row');
-  if (rows.length >= 3) { alert('성분은 최대 3개입니다.'); return; }
-
   const compRows = group.querySelector('.inc-mix-comp-rows');
   const row = document.createElement('div');
   row.className = 'mix-comp-row';
@@ -10387,13 +10391,30 @@ function switchInvEditTab(tab) {
 }
 
 function renderInvEdit() {
+  // 업체 필터 드롭다운 채우기
+  const coSel = document.getElementById('invEditCo');
+  if (coSel) {
+    const companies = [...new Set(inventory.map(r => r.company).filter(Boolean))].sort();
+    const cur = coSel.value;
+    coSel.innerHTML = '<option value="">전체 보기</option>' +
+      companies.map(c => `<option value="${c}" ${c===cur?'selected':''}>${c}</option>`).join('');
+  }
+  const coFilter = coSel ? coSel.value : '';
+
   // 완제품
   const fBody = document.getElementById('invEditFinishedBody');
   if (fBody) {
-    if (!inventory.length) {
+    const filtered = inventory.filter(r => !coFilter || r.company === coFilter);
+    const countEl = document.getElementById('invEditCount');
+    if (countEl) {
+      const totFull = filtered.reduce((s,r)=>s+(r.full||0),0);
+      const totEmpty = filtered.reduce((s,r)=>s+(r.empty||0),0);
+      countEl.textContent = `${filtered.length}개 품목 · 실병 ${totFull} · 공병 ${totEmpty}`;
+    }
+    if (!filtered.length) {
       fBody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text3);padding:20px">재고 항목이 없습니다</td></tr>';
     } else {
-      fBody.innerHTML = inventory.map(r => `<tr>
+      fBody.innerHTML = filtered.map(r => `<tr>
         <td style="font-size:12px">${r.gas}</td>
         <td style="font-size:12px">${r.size}</td>
         <td style="font-size:12px">${r.company}</td>
