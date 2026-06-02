@@ -149,8 +149,7 @@
 <script type="module">
 import { initializeApp }                        from 'https://www.gstatic.com/firebasejs/12.11.0/firebase-app.js';
 import { initializeFirestore, doc, collection,
-         getDoc, getDocs, setDoc, onSnapshot,
-         enableIndexedDbPersistence }           from 'https://www.gstatic.com/firebasejs/12.11.0/firebase-firestore.js';
+         getDoc, getDocs, setDoc, onSnapshot }  from 'https://www.gstatic.com/firebasejs/12.11.0/firebase-firestore.js';
 
 const firebaseConfig = {
   apiKey:            "AIzaSyDYKVytyeP797PVY-3j6j1Q9VxtubRRW_A",
@@ -165,12 +164,6 @@ const fbApp = initializeApp(firebaseConfig);
 const db    = initializeFirestore(fbApp, {
   experimentalForceLongPolling: true,
   useFetchStreams: false,
-});
-
-// 오프라인 지원 (IndexedDB 캐싱)
-enableIndexedDbPersistence(db).catch(err => {
-  if (err.code === 'failed-precondition') console.warn('Firebase: 여러 탭 열림 — 오프라인 지원 제한');
-  else if (err.code === 'unimplemented')  console.warn('Firebase: 이 브라우저는 오프라인 미지원');
 });
 
 // Firestore 컬렉션명 상수
@@ -206,6 +199,7 @@ const FS_KEYS = [
 ];
 
 // 리스너는 앱 초기화 완료 후 등록 (window.gasImsReady 이벤트 대기)
+const _unsubscribes = [];
 const _clientId = Math.random().toString(36).slice(2);
 window._clientId = _clientId; // fsSave에서 참조용
 
@@ -213,11 +207,13 @@ function _subscribe() {
   _unsubscribes.forEach(fn => { try { fn(); } catch(e) {} });
   _unsubscribes.length = 0;
 
+  let okCount = 0;
   FS_KEYS.forEach(key => {
     const unsub = onSnapshot(doc(db, FS_COL, key), snap => {
       if (!snap.exists()) return;
       const data = snap.data();
       const val  = data.data;
+      window._lastSync = new Date().toLocaleTimeString();
 
       // 내가 저장한 것이면 UI 갱신 스킵 (이미 로컬에서 반영됨)
       if (data.source === _clientId) {
@@ -228,12 +224,12 @@ function _subscribe() {
       localStorage.setItem(key, JSON.stringify(val));
       window.onFsUpdate && window.onFsUpdate(key, val);
     }, err => {
-      console.warn('Firebase 리스너 에러:', err.code, '— 3초 후 재구독');
+      console.warn('Firebase 리스너 에러:', key, err.code, '— 3초 후 재구독');
       setTimeout(_subscribe, 3000);
     });
     _unsubscribes.push(unsub);
   });
-  console.log('✅ Firebase 실시간 리스너 등록 (clientId:', _clientId, ')');
+  console.log('✅ Firebase 실시간 리스너 등록 완료 (clientId:', _clientId, ')');
 }
 
 window.addEventListener('gasImsReady', () => {
