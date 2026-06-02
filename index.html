@@ -2725,9 +2725,9 @@ async function initApp() {
     if (el && !el.value) el.value = t;
   });
 
-  // Firebase 사용 가능하면 최신 데이터 불러오기
-  if (window.fsLoad) {
-    showSyncStatus('⏳ Firebase에서 데이터 불러오는 중...', '#6e7681');
+  // REST 우선으로 데이터 로드 (fetch 기반 — 모든 PC 작동 확인)
+  if (window.fsLoadREST || window.fsLoad) {
+    showSyncStatus('⏳ 데이터 불러오는 중...', '#6e7681');
     try {
       const keys = [
         [STORE_KEY_INV,      []],
@@ -2744,7 +2744,9 @@ async function initApp() {
         [STORE_KEY_CLOSING,  []],
         [STORE_KEY_DAYCLOSE, []],
       ];
-      const results = await Promise.all(keys.map(([k, def]) => window.fsLoad(k, def)));
+      // REST 우선, 실패 시 SDK 폴백
+      const loader = window.fsLoadREST || window.fsLoad;
+      const results = await Promise.all(keys.map(([k, def]) => loader(k, def)));
       [inventory, logs, rawMaterials, clients, expireSettings,
        cartridges, cartLogs, analysisData, incomingLogs, orders, users, monthlyClosing, dailyClosing] = results;
 
@@ -2924,26 +2926,44 @@ async function initAuth() {
   loadingEl.style.display = 'block';
   loadingEl.innerHTML = '<div style="font-size:24px;margin-bottom:10px">🔄</div>서버에서 계정 정보를 불러오는 중...';
 
-  // 3) Firebase에서 users 가져오기 (최대 10초까지 대기)
+  // 3) 계정 정보 로드 — REST 우선(fetch 기반, 모든 PC에서 작동), SDK 폴백
   let serverReachable = false;
   let fbUsers = null;
 
-  if (window.fsLoad) {
-    const maxAttempts = 5;
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      loadingEl.innerHTML = `<div style="font-size:24px;margin-bottom:10px">🔄</div>서버 연결 중... (${attempt}/${maxAttempts})`;
-      try {
-        const loadPromise = window.fsLoad(STORE_KEY_USERS, null);
-        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 4000));
-        fbUsers = await Promise.race([loadPromise, timeoutPromise]);
+  // REST로 먼저 시도 (1~2초면 충분)
+  try {
+    loadingEl.innerHTML = '<div style="font-size:24px;margin-bottom:10px">🔄</div>서버 연결 중...';
+    if (window.fsLoadREST) {
+      fbUsers = await window.fsLoadREST(STORE_KEY_USERS, null);
+      if (fbUsers !== null) {
         serverReachable = true;
-        console.log(`[Auth] Firebase users 응답:`, fbUsers);
-        break;
-      } catch(e) {
-        console.warn(`[Auth] 시도 ${attempt}/${maxAttempts} 실패:`, e.message);
-        if (attempt < maxAttempts) await new Promise(r => setTimeout(r, 800));
+        console.log('[Auth] REST로 users 로드 성공 ✅');
       }
     }
+  } catch(e) {
+    console.warn('[Auth] REST 실패:', e.message);
+  }
+
+  // REST도 실패하면 SDK로 한 번만 시도 (3초 타임아웃)
+  if (!serverReachable && window.fsLoad) {
+    try {
+      const sdkPromise = window.fsLoad(STORE_KEY_USERS, null);
+      const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 3000));
+      fbUsers = await Promise.race([sdkPromise, timeout]);
+      if (fbUsers !== null) {
+        serverReachable = true;
+        console.log('[Auth] SDK로 users 로드 성공 ✅');
+      }
+    } catch(e) {
+      console.warn('[Auth] SDK도 실패:', e.message);
+    }
+  }
+
+  // 둘 다 실패했으나 로컬에 users가 있으면 그걸 사용
+  if (!serverReachable && users.length > 0) {
+    serverReachable = true;
+    fbUsers = users;
+    console.warn('[Auth] 서버 연결 실패, 로컬 캐시 사용');
   }
 
   loadingEl.style.display = 'none';
@@ -3016,7 +3036,15 @@ function startApp() {
 }
 
 // 앱 시작 — 인증부터
-setTimeout(initAuth, 0);
+// fsLoadREST가 준비될 때까지 대기 후 initAuth 실행 (module script 타이밍 문제 해결)
+(function waitAndInit() {
+  if (window.fsLoadREST) {
+    initAuth();
+  } else {
+    // 아직 module script가 로드 안 됨 — 50ms 후 재시도
+    setTimeout(waitAndInit, 50);
+  }
+})();
 
 // ══════ MIX GAS BUILDER ══════
 function isLiquidGas(g) {
