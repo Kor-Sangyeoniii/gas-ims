@@ -8352,6 +8352,7 @@ function migrateAnalysisData() {
   let changed = false;
   analysisData = analysisData.map(entry => {
     if (!entry.items?.length) return entry;
+    let entryChanged = false;
     const cleaned = entry.items.filter(i => {
       if (!i.name) return false;
       const v = String(i.value || '').trim().toLowerCase();
@@ -8360,8 +8361,23 @@ function migrateAnalysisData() {
       const num = parseFloat(v);
       if (!isNaN(num) && num === 0) return false; // 0이면 제거
       return true;
+    }).map(i => {
+      const unit = String(i.unit || '').toLowerCase();
+      const isPct = unit.includes('%');
+      // % 단위인데 값이 1 미만이면 (0.99999 등) → ×100 보정
+      const fixField = (field) => {
+        const raw = String(i[field] || '').trim();
+        if (!raw || raw.toLowerCase() === 'balance') return i[field];
+        const n = parseFloat(raw.replace('%','').trim());
+        if (!isNaN(n) && isPct && n > 0 && n < 1) {
+          entryChanged = true;
+          return String(+(n * 100).toFixed(5));
+        }
+        return i[field];
+      };
+      return { ...i, value: fixField('value'), spec: fixField('spec') };
     });
-    if (cleaned.length !== entry.items.length) {
+    if (cleaned.length !== entry.items.length || entryChanged) {
       changed = true;
       return { ...entry, items: cleaned };
     }
@@ -8369,7 +8385,7 @@ function migrateAnalysisData() {
   });
   if (changed) {
     save(STORE_KEY_ANALYSIS, analysisData);
-    console.log('[마이그레이션] 분析치 0% 항목 정리 완료');
+    console.log('[마이그레이션] 분석치 0% 제거 + 순도 % 보정 완료');
   }
 }
 
@@ -9213,12 +9229,17 @@ async function generateCertExcel(entry, company, issueDate, selectedCyls, valveT
             cells[`M${r}`] = { t:'s', v: addShared(specStr) };
           }
         }
-        if (valStr) {
-          if (!isNaN(vNum)) {
-            const fixed = formatMin1Decimal(vNum);
+        // 분석치(Y21): 입력값 있으면 그것, 없으면 Spec 값으로 자동 채움 (주성분 순도)
+        let y21Num = vNum, y21Str = valStr;
+        if (!valStr && specStr && !isNaN(sNum)) {
+          y21Num = sNum; y21Str = specStr;
+        }
+        if (y21Str) {
+          if (!isNaN(y21Num)) {
+            const fixed = formatMin1Decimal(y21Num);
             cells[`Y${r}`] = { t:'s', v: addShared(isPct ? `${fixed} %` : isPpm ? `${fixed} ppm 미만` : fixed) };
           } else {
-            cells[`Y${r}`] = { t:'s', v: addShared(valStr) };
+            cells[`Y${r}`] = { t:'s', v: addShared(y21Str) };
           }
         }
       } else {
