@@ -9347,8 +9347,16 @@ async function generateCertExcel(entry, company, issueDate, selectedCyls, valveT
             cells['M21'] = { t:'s', v: addShared(specStr) };
           }
         }
-        // Y21 — 분析치: valStr 있으면 우선, 없으면 specStr로 자동채움
-        const y21Str = valStr || specStr;
+        // Y21 — 분析치: valStr -> specStr -> 가스명 순도 순으로 fallback
+        let y21Str = valStr || specStr;
+        if (!y21Str) {
+          const g = entry.gas || '';
+          if (g.includes('N60'))           y21Str = '99.9999';
+          else if (g.includes('N55'))      y21Str = '99.9995';
+          else if (g.includes('초고순도')) y21Str = '99.999';
+          else if (g.includes('고순도'))   y21Str = '99.999';
+          else if (g.includes('공업용'))   y21Str = '99.0';
+        }
         if (y21Str) {
           const y21Num = parseFloat(y21Str);
           if (!isNaN(y21Num)) {
