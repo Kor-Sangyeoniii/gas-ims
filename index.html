@@ -9347,7 +9347,17 @@ async function generateCertExcel(entry, company, issueDate, selectedCyls, valveT
             cells['M21'] = { t:'s', v: addShared(specStr) };
           }
         }
-        // Y21 (분析치)은 빈칸으로 두고 직접 기입
+        // Y21 — 분析치: valStr 있으면 우선, 없으면 specStr로 자동채움
+        const y21Str = valStr || specStr;
+        if (y21Str) {
+          const y21Num = parseFloat(y21Str);
+          if (!isNaN(y21Num)) {
+            const fixed = formatMin1Decimal(y21Num);
+            cells['Y21'] = { t:'s', v: addShared(isPercent ? `${fixed} %` : fixed) };
+          } else {
+            cells['Y21'] = { t:'s', v: addShared(y21Str) };
+          }
+        }
       } else {
         // Row 22~25 — 큰 병합셀 (M:X, Y:AJ), 소수점 최소 1자리
         if (specStr) {
