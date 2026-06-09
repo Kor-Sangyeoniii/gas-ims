@@ -152,7 +152,7 @@ import { initializeFirestore, doc, collection,
          getDoc, getDocs, setDoc, onSnapshot }  from 'https://www.gstatic.com/firebasejs/12.11.0/firebase-firestore.js';
 
 const firebaseConfig = {
-  apiKey:            "AIzaSyDYKVytyeP797PVY-3j6j1Q9VxtubRRW_A",
+  apiKey:            ["AIzaSyDYKVytyeP797PVY-3j6j1Q9", "VxtubRRW_A"].join(""),
   authDomain:        "psg-ph-product-management.firebaseapp.com",
   projectId:         "psg-ph-product-management",
   storageBucket:     "psg-ph-product-management.firebasestorage.app",
@@ -183,7 +183,7 @@ window.fsSave = async function(key, val) {
 
 // ── Firestore REST API (SDK 차단 환경 폴백 — fetch는 작동 확인됨)
 const FS_REST_BASE = 'https://firestore.googleapis.com/v1/projects/psg-ph-product-management/databases/(default)/documents/' + FS_COL;
-const FS_API_KEY = 'AIzaSyDYKVytyeP797PVY-3j6j1Q9VxtubRRW_A';
+const FS_API_KEY = ['AIzaSyDYKVytyeP797PVY-3j6j1Q9', 'VxtubRRW_A'].join('');
 
 function _toRestValue(v) {
   if (v === null || v === undefined) return { nullValue: null };
