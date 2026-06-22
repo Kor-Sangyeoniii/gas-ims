@@ -5720,23 +5720,40 @@ function convertMixName(oldName) {
   if (!oldName || !oldName.startsWith('혼합')) return oldName;
   const m = oldName.match(/\[(.+)\]/);
   if (!m) return oldName;
-  return m[1].split('/').map(s => {
-    s = s.trim();
+  const parts = m[1].split('/').map(s => s.trim());
+  return parts.map((s, idx) => {
+    const isLast = idx === parts.length - 1;
     const m2 = s.match(/^(.+?)\s+(\d+(?:\.\d+)?)%$/);
-    if (m2) return `${m2[2]}%${m2[1].trim()}`;
+    if (m2) return isLast ? m2[1].trim() : `${m2[2]}%${m2[1].trim()}`;
     const m3 = s.match(/^(.+?)\s+Balance$/i);
     if (m3) return m3[1].trim();
-    return s; // balance (퍼센트 없이 가스명만)
+    return s;
   }).join('+');
+}
+
+// 이미 신 포맷으로 변환된 이름의 마지막 성분 % 제거
+function stripLastPct(name) {
+  if (!name || name.startsWith('혼합') || !isMixGas(name)) return name;
+  const parts = name.split('+');
+  if (parts.length < 2) return name;
+  const last = parts[parts.length - 1];
+  const m = last.match(/^(\d+(?:\.\d+)?)%(.+)$/);
+  if (m) parts[parts.length - 1] = m[2]; // % 제거
+  return parts.join('+');
 }
 
 // 전체 데이터 마이그레이션 (구 포맷 → 신 포맷)
 function migrateMixGasNames() {
   let changed = false;
   const convertArr = (arr) => arr.map(item => {
-    if (item && item.gas && item.gas.startsWith('혼합')) {
-      item.gas = convertMixName(item.gas);
-      changed = true;
+    if (item && item.gas) {
+      if (item.gas.startsWith('혼합')) {
+        item.gas = convertMixName(item.gas);
+        changed = true;
+      } else if (isMixGas(item.gas)) {
+        const fixed = stripLastPct(item.gas);
+        if (fixed !== item.gas) { item.gas = fixed; changed = true; }
+      }
     }
     return item;
   });
@@ -5746,18 +5763,26 @@ function migrateMixGasNames() {
   incomingLogs = convertArr(incomingLogs);
   if (Array.isArray(orders)) orders = orders.map(o => {
     if (o && Array.isArray(o.items)) o.items = o.items.map(it => {
-      if (it && it.gas && it.gas.startsWith('혼합')) { it.gas = convertMixName(it.gas); changed = true; }
+      if (it && it.gas) {
+        if (it.gas.startsWith('혼합')) { it.gas = convertMixName(it.gas); changed = true; }
+        else if (isMixGas(it.gas)) { const f = stripLastPct(it.gas); if (f !== it.gas) { it.gas = f; changed = true; } }
+      }
       return it;
     });
     return o;
   });
+  // PSG-PH → 47L 규격 일괄 변환
+  inventory.forEach(item => {
+    if (item && item.size === 'PSG-PH') { item.size = '47L'; changed = true; }
+  });
+
   if (changed) {
     save(STORE_KEY_INV,      inventory);
     save(STORE_KEY_LOG,      logs);
     save(STORE_KEY_ANALYSIS, analysisData);
     save(STORE_KEY_INCOMING, incomingLogs);
     save(STORE_KEY_ORDERS,   orders);
-    console.log('[MigrateMixName] 혼합가스 품명 신 포맷 변환 완료');
+    console.log('[MigrateMixName] 혼합가스 품명 신 포맷 + PSG-PH→47L 변환 완료');
   }
 }
 
