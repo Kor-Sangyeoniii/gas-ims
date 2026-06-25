@@ -2687,8 +2687,15 @@ function showSyncStatus(msg, color) {
 // 실시간 업데이트 핸들러 (다른 기기에서 변경 시 호출됨)
 window.onFsUpdate = function(key, val) {
   switch(key) {
-    case STORE_KEY_INV:      inventory      = val; if(document.getElementById('page-closing')?.style.display!=='none') loadClosingSnapshot(); break;
-    case STORE_KEY_LOG:      logs           = val; break;
+    case STORE_KEY_INV:
+      inventory = val;
+      { let ch=false; inventory.forEach(it=>{ if(migrateMixGasItem(it)) ch=true; }); if(ch) save(STORE_KEY_INV,inventory); }
+      if(document.getElementById('page-closing')?.style.display!=='none') loadClosingSnapshot();
+      break;
+    case STORE_KEY_LOG:
+      logs = val;
+      { let ch=false; logs.forEach(it=>{ if(migrateMixGasItem(it)) ch=true; }); if(ch) save(STORE_KEY_LOG,logs); }
+      break;
     case STORE_KEY_RAW:
       rawMaterials = val;
       if (typeof rawMaterials.He === 'number') {
@@ -2906,7 +2913,6 @@ function requireAdmin() {
 
 // 최초 진입 — 사용자 있으면 로그인 화면, 없으면 최초 관리자 등록
 async function initAuth() {
-  migrateMixGasNames();
   // 1) 로컬에서 먼저 users 로드 (fallback용)
   users = load(STORE_KEY_USERS, []);
 
@@ -3158,7 +3164,6 @@ function onBSizeChange() {
 
 function isMixGas(gasName) {
   if (!gasName) return false;
-  // 구 포맷: 혼합 [...]  /  신 포맷: 5%CO₂+35%N₂+He (% 와 + 포함)
   return gasName.startsWith('혼합') || (gasName.includes('%') && gasName.includes('+'));
 }
 
@@ -3352,12 +3357,10 @@ const GAS_LOT_CODE = {
 function getLotCode(gas) {
   if (GAS_LOT_CODE[gas]) return GAS_LOT_CODE[gas];
   if (isMixGas(gas)) {
-    // 신 포맷: 5%CO₂+35%N₂+He → MIX-CO₂-N₂-HE
     if (!gas.startsWith('혼합')) {
       const parts = gas.split('+').map(p => { const m = p.match(/^\d+(?:\.\d+)?%(.+)$/); return m ? m[1] : p; });
       return 'MIX-' + parts.join('-').toUpperCase();
     }
-    // 구 포맷: 혼합 [He 10% / N₂ 90%] → MIX-HE-N2
     const parts = gas.replace('혼합 [','').replace(']','').split(' / ').map(p=>p.split(' ')[0]);
     return 'MIX-' + parts.join('-');
   }
@@ -5693,15 +5696,13 @@ function getRawKey(gasName) {
 // 혼합가스 성분 파싱: "혼합 [He 5% / N₂ 90% / CO₂ 5%]" → [{sym, pct}]
 function parseMixComponents(gasName) {
   if (!gasName) return [];
-  // 신 포맷: 5%CO₂+35%N₂+He
   if (!gasName.startsWith('혼합') && isMixGas(gasName)) {
     return gasName.split('+').map(p => {
       const m = p.trim().match(/^(\d+(?:\.\d+)?)%(.+)$/);
       if (m) return { sym: m[2].trim(), pct: parseFloat(m[1]) };
-      return { sym: p.trim(), pct: 0 }; // balance
+      return { sym: p.trim(), pct: 0 };
     });
   }
-  // 구 포맷: 혼합 [CO₂ 5% / N₂ 35% / He]
   if (!gasName.startsWith('혼합')) return [];
   const m = gasName.match(/\[(.+)\]/);
   if (!m) return [];
@@ -5714,8 +5715,7 @@ function parseMixComponents(gasName) {
 }
 
 
-
-// 구 혼합가스명 → 신 포맷 변환
+// ── 혼합가스 품명 변환 헬퍼 ──────────────────────────────────
 function convertMixName(oldName) {
   if (!oldName || !oldName.startsWith('혼합')) return oldName;
   const m = oldName.match(/\[(.+)\]/);
@@ -5730,62 +5730,29 @@ function convertMixName(oldName) {
     return s;
   }).join('+');
 }
-
-// 이미 신 포맷으로 변환된 이름의 마지막 성분 % 제거
 function stripLastPct(name) {
   if (!name || name.startsWith('혼합') || !isMixGas(name)) return name;
   const parts = name.split('+');
   if (parts.length < 2) return name;
   const last = parts[parts.length - 1];
   const m = last.match(/^(\d+(?:\.\d+)?)%(.+)$/);
-  if (m) parts[parts.length - 1] = m[2]; // % 제거
+  if (m) parts[parts.length - 1] = m[2];
   return parts.join('+');
 }
-
-// 전체 데이터 마이그레이션 (구 포맷 → 신 포맷)
-function migrateMixGasNames() {
+// 단일 항목 변환 (Firebase 수신 즉시 처리)
+function migrateMixGasItem(item) {
+  if (!item || !item.gas) return false;
   let changed = false;
-  const convertArr = (arr) => arr.map(item => {
-    if (item && item.gas) {
-      if (item.gas.startsWith('혼합')) {
-        item.gas = convertMixName(item.gas);
-        changed = true;
-      } else if (isMixGas(item.gas)) {
-        const fixed = stripLastPct(item.gas);
-        if (fixed !== item.gas) { item.gas = fixed; changed = true; }
-      }
-    }
-    return item;
-  });
-  inventory    = convertArr(inventory);
-  logs         = convertArr(logs);
-  analysisData = convertArr(analysisData);
-  incomingLogs = convertArr(incomingLogs);
-  if (Array.isArray(orders)) orders = orders.map(o => {
-    if (o && Array.isArray(o.items)) o.items = o.items.map(it => {
-      if (it && it.gas) {
-        if (it.gas.startsWith('혼합')) { it.gas = convertMixName(it.gas); changed = true; }
-        else if (isMixGas(it.gas)) { const f = stripLastPct(it.gas); if (f !== it.gas) { it.gas = f; changed = true; } }
-      }
-      return it;
-    });
-    return o;
-  });
-  // PSG-PH → 47L 규격 일괄 변환
-  inventory.forEach(item => {
-    if (item && item.size === 'PSG-PH') { item.size = '47L'; changed = true; }
-  });
-
-  if (changed) {
-    save(STORE_KEY_INV,      inventory);
-    save(STORE_KEY_LOG,      logs);
-    save(STORE_KEY_ANALYSIS, analysisData);
-    save(STORE_KEY_INCOMING, incomingLogs);
-    save(STORE_KEY_ORDERS,   orders);
-    console.log('[MigrateMixName] 혼합가스 품명 신 포맷 + PSG-PH→47L 변환 완료');
+  if (item.gas.startsWith('혼합')) {
+    item.gas = convertMixName(item.gas); changed = true;
+  } else if (isMixGas(item.gas)) {
+    const f = stripLastPct(item.gas);
+    if (f !== item.gas) { item.gas = f; changed = true; }
   }
+  // PSG-PH → 47L 규격 변환
+  if (item.size === 'PSG-PH') { item.size = '47L'; changed = true; }
+  return changed;
 }
-
 // 성분 기호 → 원재료 키 매핑
 function symToRawKey(sym) {
   const s = sym.toUpperCase();
@@ -6300,13 +6267,13 @@ function renderCylRawTiles() {
   const ch4WasteKg  = pvtM3(CYL_VOL_L, CYL_WASTE_BAR) * CH4_DENSITY;
 
   const cylInfo = [
-    { label:'H₂ 공업용',  key:'H2_industrial',  color:'#f0883e', kgPerBtl:h2KgPerBtl,   unit:'47L/130bar', wasteKg:h2WasteKg },
-    { label:'H₂ 고순도',  key:'H2_pure',         color:'#f0883e', kgPerBtl:h2KgPerBtl,   unit:'47L/130bar', wasteKg:h2WasteKg },
-    { label:'O₂ 공업용',  key:'O2_industrial',  color:'#39d353', kgPerBtl:o2KgPerBtl,   unit:'47L/130bar', wasteKg:o2WasteKg },
-    { label:'O₂ 고순도',  key:'O2_pure',         color:'#39d353', kgPerBtl:o2KgPerBtl,   unit:'47L/130bar', wasteKg:o2WasteKg },
+    { label:'H₂ 공업용',  key:'H2_industrial',  color:'#f0883e', kgPerBtl:h2KgPerBtl,     unit:'47L/130bar', wasteKg:h2WasteKg },
+    { label:'H₂ 고순도',  key:'H2_pure',         color:'#f0883e', kgPerBtl:h2KgPerBtl,     unit:'47L/130bar', wasteKg:h2WasteKg },
+    { label:'O₂ 공업용',  key:'O2_industrial',  color:'#39d353', kgPerBtl:o2KgPerBtl,     unit:'47L/130bar', wasteKg:o2WasteKg },
+    { label:'O₂ 고순도',  key:'O2_pure',         color:'#39d353', kgPerBtl:o2KgPerBtl,     unit:'47L/130bar', wasteKg:o2WasteKg },
     { label:'CO₂ 공업용', key:'CO2_industrial', color:'#58a6ff', kgPerBtl:CO2_KG_PER_BTL, unit:'20kg/병',   wasteKg:CO2_WASTE_KG },
     { label:'CO₂ 고순도', key:'CO2_pure',        color:'#58a6ff', kgPerBtl:CO2_KG_PER_BTL, unit:'20kg/병',   wasteKg:CO2_WASTE_KG },
-    { label:'CH₄ (메탄)', key:'CH4',             color:'#b08060', kgPerBtl:ch4KgPerBtl,  unit:'47L/130bar', wasteKg:ch4WasteKg },
+    { label:'CH₄ (메탄)', key:'CH4',             color:'#b08060', kgPerBtl:ch4KgPerBtl,   unit:'47L/130bar', wasteKg:ch4WasteKg },
   ];
 
   wrap.innerHTML = cylInfo.map(g => {
@@ -7848,13 +7815,23 @@ const AN_TEMPLATES = {
 function getAnTemplate(gas) {
   if (!gas) return AN_TEMPLATES.default || [];
 
-  // 혼합가스: 품목명에서 성분 파싱해서 자동 생성
-  // 형식: "혼합 [He 5% / N₂ 95%]"
-  if (gas.startsWith('혼합')) {
+  // 혼합가스: 구 포맷(혼합 [...]) + 신 포맷(5%CO₂+25%N₂+He) 모두 처리
+  if (isMixGas(gas)) {
+    if (!gas.startsWith('혼합')) {
+      return gas.split('+').map(p => {
+        p = p.trim();
+        const m = p.match(/^(\d+(?:\.\d+)?)%(.+)$/);
+        if (m) {
+          const n = parseFloat(m[1]);
+          const numStr = isNaN(n) ? m[1] : n.toFixed(1);
+          return { name: m[2].trim(), unit: '%', spec: numStr, value: numStr };
+        }
+        return { name: p, unit: '%', spec: 'Balance', value: 'Balance' };
+      });
+    }
     const match = gas.match(/\[(.+)\]/);
     if (match) {
       const parts = match[1].split('/').map(s => s.trim());
-      // 기존 명시적 Balance 존재 여부 확인
       const hasBalance = parts.some(p => p.toLowerCase().includes('balance') || p.toLowerCase().includes('bal'));
       return parts.map((p, idx) => {
         const tokens = p.split(' ');
@@ -7863,17 +7840,11 @@ function getAnTemplate(gas) {
         const isExplicitBal = valStr === '' || p.toLowerCase().includes('balance') || p.toLowerCase().includes('bal');
         const isAutoBal     = !hasBalance && idx === parts.length - 1 && parts.length >= 2;
         const isBalance = isExplicitBal || isAutoBal;
-        // 숫자값은 소수점 1자리로 포맷 (5 → 5.0, 35 → 35.0, 5.123 → 5.1)
         const numStr = isBalance ? '' : (() => {
           const n = parseFloat(valStr.replace('%',''));
           return isNaN(n) ? valStr.replace('%','') : n.toFixed(1);
         })();
-        return {
-          name,
-          unit: '%',
-          spec: isBalance ? 'Balance' : numStr,
-          value: isBalance ? 'Balance' : numStr
-        };
+        return { name, unit: '%', spec: isBalance ? 'Balance' : numStr, value: isBalance ? 'Balance' : numStr };
       });
     }
     return [{ name: '성분1', unit: '%', spec: '' }, { name: '성분2', unit: '%', spec: '' }];
@@ -8769,7 +8740,7 @@ function openCertModal(entry) {
   certTargetEntry = entry;
   // Air는 21% O₂ + N₂ 혼합가스이므로 혼합가스 양식 사용
   const isAir = entry.gas.toLowerCase().includes('air') || entry.gas.startsWith('Air');
-  const isMix = entry.gas.startsWith('혼합') || isAir;
+  const isMix = isMixGas(entry.gas) || isAir;
   const productName = gasToProductName(entry.gas);
 
   // LOT 정보 표시
@@ -8954,7 +8925,7 @@ async function generateCertExcel(entry, company, issueDate, selectedCyls, valveT
   valveType    = valveType    || 'W22 - # -RH';
   // Air도 혼합가스 양식(CERT_TPL_MIX) 사용 — 21% O₂ + N₂ 혼합기체
   const isAir  = entry.gas.toLowerCase().includes('air') || entry.gas.startsWith('Air');
-  const isMix  = entry.gas.startsWith('혼합') || isAir;
+  const isMix  = isMixGas(entry.gas) || isAir;
   fillPressure = fillPressure != null ? fillPressure : (isMix && !isAir ? 110 : 120);
 
   // Product Name 변환
@@ -9436,7 +9407,7 @@ async function generateCertExcel(entry, company, issueDate, selectedCyls, valveT
             cells['M21'] = { t:'s', v: addShared(specStr) };
           }
         }
-        // Y21 — 분析치: valStr -> specStr -> 가스명 순도 순으로 fallback
+        // Y21 — 분析치: valStr → specStr → 가스명 순도 순으로 fallback
         let y21Str = valStr || specStr;
         if (!y21Str) {
           const g = entry.gas || '';
