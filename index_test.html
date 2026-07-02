@@ -2563,6 +2563,11 @@ function save(key, val) {
   // Firebase에 비동기 저장 (연결 시 자동 업로드)
   if (window.fsSave) window.fsSave(key, val);
 }
+// Firebase 저장 완료까지 기다려야 할 때(백업 복원 등) 사용
+async function saveAwait(key, val) {
+  localStorage.setItem(key, JSON.stringify(val));
+  if (window.fsSave) { try { await window.fsSave(key, val); } catch(e) {} }
+}
 
 let inventory = load(STORE_KEY_INV, []);
 let logs      = load(STORE_KEY_LOG, []);
@@ -11482,7 +11487,7 @@ function importBackup(input) {
   if (!file) return;
 
   const reader = new FileReader();
-  reader.onload = (e) => {
+  reader.onload = async (e) => {
     try {
       const data = JSON.parse(e.target.result);
 
@@ -11494,23 +11499,25 @@ function importBackup(input) {
       }
 
       const exportedAt = data._exportedAt || '알 수 없음';
-      const invCount   = (data[STORE_KEY_INV]  || []).length;
-      const logCount   = (data[STORE_KEY_LOG]  || []).length;
-      const cartCount  = (data[STORE_KEY_CART] || []).length;
+      const invCount    = (data[STORE_KEY_INV]    || []).length;
+      const logCount    = (data[STORE_KEY_LOG]    || []).length;
+      const cartCount   = (data[STORE_KEY_CART]   || []).length;
+      const orderCount  = (data[STORE_KEY_ORDERS] || []).length;
 
       if (!confirm(
         `백업 파일 정보:\n` +
         `  내보낸 시각: ${exportedAt}\n` +
         `  재고 항목: ${invCount}개\n` +
         `  이력: ${logCount}건\n` +
-        `  카트리지: ${cartCount}개\n\n` +
+        `  카트리지: ${cartCount}개\n` +
+        `  발주: ${orderCount}건\n\n` +
         `⚠️ 현재 기기의 모든 데이터가 이 파일로 교체됩니다.\n계속하시겠습니까?`
       )) {
         input.value = '';
         return;
       }
 
-      // 데이터 복원
+      // 데이터 복원 — Firebase 저장이 실제로 끝날 때까지 기다림 (경쟁 상태 방지)
       const allKeys = [
         STORE_KEY_INV, STORE_KEY_LOG,
         STORE_KEY_RAW,
@@ -11520,11 +11527,10 @@ function importBackup(input) {
         STORE_KEY_ORDERS, STORE_KEY_SIGS,
         STORE_KEY_ADMINPW,
       ];
-      allKeys.forEach(k => {
-        if (data[k] !== undefined) {
-          save(k, data[k]);  // localStorage + Firebase 동시 저장
-        }
-      });
+      const st = document.getElementById('backupStatus');
+      if (st) { st.style.display = 'block'; st.style.color = 'var(--text2)'; st.textContent = '⏳ 데이터 복원 중... (창을 닫지 마세요)'; }
+
+      await Promise.all(allKeys.map(k => data[k] !== undefined ? saveAwait(k, data[k]) : Promise.resolve()));
 
       // 메모리 변수 재로드
       inventory     = load(STORE_KEY_INV,      []);
@@ -11541,12 +11547,12 @@ function importBackup(input) {
       signatures    = load(STORE_KEY_SIGS,      []);
 
       input.value = '';
-      alert(`✅ 데이터 복원 완료!\n재고 ${invCount}개 · 이력 ${logCount}건\n\n잠시 후 페이지가 새로고침됩니다.`);
-      // Firebase 저장 완료 후 새로고침 (폴링 덮어쓰기 방지)
-      setTimeout(() => location.reload(), 2000);
+      alert(`✅ 데이터 복원 완료!\n재고 ${invCount}개 · 이력 ${logCount}건 · 발주 ${orderCount}건\n\n잠시 후 페이지가 새로고침됩니다.`);
+      // Firebase 저장이 모두 끝난 뒤 새로고침 (폴링 덮어쓰기 방지)
+      location.reload();
 
     } catch (err) {
-      alert('❌ 파일 읽기 오류: ' + err.message);
+      alert('❌ 복원 중 오류: ' + err.message);
       input.value = '';
     }
   };
