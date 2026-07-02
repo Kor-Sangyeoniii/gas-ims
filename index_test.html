@@ -2658,6 +2658,7 @@ const LHE_LIQ_DENSITY = 15.6 / 100;
 const LN2_LIQ_DENSITY = 120 / 176;
 const LAR_LIQ_DENSITY = 192 / 176;
 const CO2_KG_PER_BTL = 20, CO2_WASTE_KG = 2;
+const CO2_DENSITY = 1.842; // kg/Nm³ (0°C·1atm 기준 표준값) — 혼합가스 성분 계산용
 const CYL_VOL_L = 47, CYL_FILL_BAR = 130, CYL_WASTE_BAR = 10, ATM_KGF = 1.033;
 let heDisplayUnit = 'kg';
 
@@ -5988,6 +5989,7 @@ function m3ToKg(m3, key) {
   if (key === 'Ar')  return m3 / AR_KG_TO_M3;
   if (key === 'H2')  return m3 * H2_DENSITY;
   if (key === 'O2')  return m3 * O2_DENSITY;
+  if (key === 'CO2') return m3 * CO2_DENSITY;
   return 0;
 }
 
