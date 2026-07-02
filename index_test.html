@@ -2653,6 +2653,10 @@ migrateToTanks('Ar');
 save(STORE_KEY_RAW, rawMaterials);
 const HE_KG_TO_M3 = 6.03, N2_KG_TO_M3 = 0.799, AR_KG_TO_M3 = 0.561;
 const H2_DENSITY = 0.0838, O2_DENSITY = 1.308;
+// 액체가스 밀도 (kg/L) — 실측 기준: LHe 100L=15.6kg, LN₂/LAr 176L=120kg/192kg
+const LHE_LIQ_DENSITY = 15.6 / 100;
+const LN2_LIQ_DENSITY = 120 / 176;
+const LAR_LIQ_DENSITY = 192 / 176;
 const CO2_KG_PER_BTL = 20, CO2_WASTE_KG = 2;
 const CYL_VOL_L = 47, CYL_FILL_BAR = 130, CYL_WASTE_BAR = 10, ATM_KGF = 1.033;
 let heDisplayUnit = 'kg';
@@ -3809,9 +3813,9 @@ function onProdGasChange() {
   const heTankField = document.getElementById('prodHeTankField');
   const heTankLabel = document.getElementById('prodHeTankLabel');
 
-  const isHeGas = gas.includes('He') && !gas.startsWith('LHe');
-  const isN2Gas = gas.startsWith('N₂') || gas === 'N2';
-  const isArGas = gas.startsWith('Ar');
+  const isHeGas = gas.includes('He');
+  const isN2Gas = gas.startsWith('N₂') || gas === 'N2' || gas.startsWith('LN₂') || gas.startsWith('LN2');
+  const isArGas = gas.startsWith('Ar') || gas.startsWith('LAr');
 
   if (heSrcField) heSrcField.style.display = isHeGas ? 'block' : 'none';
   if (heTankField) {
@@ -6005,8 +6009,18 @@ function calcProductionConsumption(gas, sizeL, fillBar, qty) {
       const compKgTotal  = m3ToKg(compM3Total, key);
       result.push({ key, sym:c.sym, pct:c.pct, m3PerCyl:compM3PerCyl, kgTotal:compKgTotal, qty });
     });
+  } else if (isLiquidGas(gas)) {
+    // 액체가스 (LHe/LN₂/LAr): 압력식이 아닌 리터×액체밀도로 계산
+    const key = getRawKey(gas);
+    if (!key) return result;
+    const density = gas.startsWith('LHe') ? LHE_LIQ_DENSITY
+                  : gas.startsWith('LN')  ? LN2_LIQ_DENSITY
+                  : LAR_LIQ_DENSITY;
+    const kgPerCyl = sizeL * density;
+    const kgTotal  = kgPerCyl * qty;
+    result.push({ key, sym:key, pct:100, m3PerCyl:kgPerCyl/(key==='He'?HE_KG_TO_M3:key==='N2'?N2_KG_TO_M3:AR_KG_TO_M3), kgTotal, qty });
   } else {
-    // 단일가스
+    // 단일가스 (압축가스)
     const key = getRawKey(gas);
     if (!key) return result;
     const m3PerCyl  = pvtM3(sizeL, fillBar);
