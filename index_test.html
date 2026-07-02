@@ -523,6 +523,7 @@ console.log('✅ Firebase 초기화 완료');
             <option value="CO2">CO₂ — kg (20kg/병)</option>
             <option value="CH4">CH₄ (메탄) — 병 (47L/120bar)</option>
           </optgroup>
+          <optgroup id="rawGasSelCustomGroup" label="커스텀 등록 원재료" style="display:none"></optgroup>
         </select>
       </div>
       <!-- He ISO Tank 전용: Invoice kg + 최초 계근값 -->
@@ -698,7 +699,7 @@ console.log('✅ Firebase 초기화 완료');
             <div class="mix-row" style="display:grid;grid-template-columns:1fr 90px 52px 28px;gap:6px;align-items:center;margin-bottom:6px;">
               <select class="mix-gas-sel" onchange="handleMixSelChange(this);updateMixPreviewLegacy()">
                 <option value="">성분 선택</option>
-                <option>H₂ (수소)</option><option>He (헬륨)</option><option>N₂ (질소)</option><option>O₂ (산소)</option><option>Ar (아르곤)</option><option>CO₂</option><option>CH₄ (메탄)</option><option>Novec 7100</option>
+                <option>H₂ (수소)</option><option>He (헬륨)</option><option>N₂ (질소)</option><option>O₂ (산소)</option><option>Ar (아르곤)</option><option>CO₂</option><option>CH₄ (메탄)</option>
                 <option>직접입력</option>
               </select>
               <input type="number" class="mix-pct-inp" min="0" max="100" step="0.001" placeholder="%" oninput="updateMixPreviewLegacy()" style="text-align:right">
@@ -2188,6 +2189,64 @@ console.log('✅ Firebase 초기화 완료');
       </div>
     </div>
 
+    <!-- 커스텀 원재료 등록 -->
+    <div class="card" style="margin-bottom:16px;border:1px solid var(--purple)">
+      <div class="sec-h" style="color:var(--purple)">🧪 커스텀 원재료 등록</div>
+      <div class="alert alert-info" style="margin-bottom:14px;font-size:12px">
+        현재 목록에 없는 가스(예: CO, SF₆, C₃H₈ 등)를 혼합가스 성분으로 새로 취급하게 되면 여기서 등록하세요.
+        등록하면 혼합가스 성분 선택 목록·원재료 입고 화면에 자동으로 추가되고, 생산 시 정확한 소모량이 계산·차감됩니다.
+      </div>
+
+      <div class="form-grid" style="grid-template-columns:1fr 1.4fr;gap:10px;margin-bottom:10px">
+        <div class="field">
+          <label>성분 기호 (예: CO)</label>
+          <input type="text" id="craSym" placeholder="CO">
+        </div>
+        <div class="field">
+          <label>표시명 (기호와 동일하게 시작해야 함)</label>
+          <input type="text" id="craLabel" placeholder="CO (일산화탄소)">
+        </div>
+      </div>
+      <div class="form-grid" style="grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
+        <div class="field">
+          <label>분자량 (g/mol) <span style="color:var(--text3);font-size:10px">— 입력하면 밀도 자동계산</span></label>
+          <input type="number" id="craMolar" step="0.01" min="0" placeholder="예: 28.01" oninput="craCalcDensity()">
+        </div>
+        <div class="field">
+          <label>밀도 (kg/Nm³ · 0℃·1atm 기준)</label>
+          <input type="number" id="craDensity" step="0.0001" min="0" placeholder="분자량 입력 시 자동계산, 직접입력도 가능">
+        </div>
+      </div>
+      <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:10px">
+        <div class="field">
+          <label>입고 형태</label>
+          <select id="craForm" onchange="craFormChange()">
+            <option value="kg">벌크 — kg 직접 입력 (CO₂ 방식)</option>
+            <option value="cyl">실린더 — 병 단위 (H₂/O₂/CH₄ 방식)</option>
+          </select>
+        </div>
+        <div class="field" id="craCylVolField" style="display:none">
+          <label>실린더 규격 (L)</label>
+          <input type="number" id="craCylVol" step="1" min="0" placeholder="예: 47">
+        </div>
+        <div class="field" id="craCylBarField" style="display:none">
+          <label>충전 압력 (bar)</label>
+          <input type="number" id="craCylBar" step="1" min="0" placeholder="예: 130">
+        </div>
+      </div>
+      <div class="field" id="craWasteField" style="display:none;max-width:260px;margin-bottom:10px">
+        <label>폐기(교체) 기준 잔량 (kg) <span style="color:var(--text3);font-size:10px">— 비워두면 0kg까지 전량 사용</span></label>
+        <input type="number" id="craWasteKg" step="0.1" min="0" placeholder="예: 2 (선택)">
+      </div>
+
+      <div class="flex-end">
+        <button class="btn btn-success" onclick="addCustomRawGas()">✅ 원재료 등록</button>
+      </div>
+
+      <hr class="divider">
+      <div id="customRawList"><p style="color:var(--text3);font-size:13px;text-align:center;padding:10px 0">등록된 커스텀 원재료가 없습니다</p></div>
+    </div>
+
     <!-- 성적서 자동 저장 폴더 -->
     <div class="card" style="margin-bottom:16px;border:1px solid var(--teal)">
       <div class="sec-h" style="color:var(--teal)">📁 성적서 자동 저장 폴더</div>
@@ -2696,9 +2755,12 @@ const STORE_KEY_USERS     = 'gasims_users_v1';
 const STORE_KEY_SESSION   = 'gasims_session_v1';
 const STORE_KEY_CLOSING   = 'gasims_monthly_closing_v1';
 const STORE_KEY_DAYCLOSE  = 'gasims_daily_closing_v1';
+const STORE_KEY_CUSTOMRAW = 'gasims_custom_raw_defs_v1';
 let users = load(STORE_KEY_USERS, []); // [{id, name, pw, role:'admin'|'staff', createdAt}]
 let monthlyClosing = load(STORE_KEY_CLOSING, []); // 월별 마감 데이터
 let dailyClosing   = load(STORE_KEY_DAYCLOSE, []); // 일일 마감(실사) 데이터
+// 커스텀 원재료 정의: [{id,key,symbol,label,molarMass,density,formType:'kg'|'cyl',cylVol,cylBar,wasteKg}]
+let customRawDefs  = load(STORE_KEY_CUSTOMRAW, []);
 let currentUser = null;
 
 // UI state
@@ -2790,6 +2852,12 @@ window.onFsUpdate = function(key, val) {
     case STORE_KEY_USERS:    users          = val; renderUserList && renderUserList(); break;
     case STORE_KEY_CLOSING:  monthlyClosing = val; renderClosingList && renderClosingList(); break;
     case STORE_KEY_DAYCLOSE: dailyClosing = val; renderClosingHist && renderClosingHist(); break;
+    case STORE_KEY_CUSTOMRAW:
+      customRawDefs = val;
+      renderCustomRawList && renderCustomRawList();
+      refreshMixGasOptionLists && refreshMixGasOptionLists();
+      refreshRawGasSelOptions && refreshRawGasSelOptions();
+      break;
   }
   // UI 갱신 (현재 보이는 탭만)
   renderAll();
@@ -2822,12 +2890,13 @@ async function initApp() {
         [STORE_KEY_USERS,    []],
         [STORE_KEY_CLOSING,  []],
         [STORE_KEY_DAYCLOSE, []],
+        [STORE_KEY_CUSTOMRAW, []],
       ];
       // REST 우선, 실패 시 SDK 폴백
       const loader = window.fsLoadREST || window.fsLoad;
       const results = await Promise.all(keys.map(([k, def]) => loader(k, def)));
       [inventory, logs, rawMaterials, clients, expireSettings,
-       cartridges, cartLogs, analysisData, incomingLogs, orders, users, monthlyClosing, dailyClosing] = results;
+       cartridges, cartLogs, analysisData, incomingLogs, orders, users, monthlyClosing, dailyClosing, customRawDefs] = results;
 
       // He 구조 마이그레이션
       if (typeof rawMaterials.He === 'number') {
@@ -2853,6 +2922,9 @@ async function initApp() {
   renderAll();
   initProdPage();
   initIncomingPage();
+  refreshMixGasOptionLists();
+  refreshRawGasSelOptions();
+  renderCustomRawList();
 
   // 실시간 리스너 시작
   window.dispatchEvent(new Event('gasImsReady'));
@@ -3239,6 +3311,23 @@ function isMixGas(gasName) {
   return gasName.startsWith('혼합') || (gasName.includes('%') && gasName.includes('+'));
 }
 
+// 혼합가스 성분 선택 옵션 (기본 성분 + 커스텀 등록 원재료)
+const MIX_GAS_SEL_BASE = ['H₂ (수소)','He (헬륨)','N₂ (질소)','O₂ (산소)','Ar (아르곤)','CO₂','CH₄ (메탄)'];
+function mixGasSelOptionsHtml() {
+  const list = [...MIX_GAS_SEL_BASE, ...customRawDefs.map(d => d.label)];
+  return '<option value="">성분 선택</option>' +
+    list.map(g => `<option>${g}</option>`).join('') +
+    '<option>직접입력</option>';
+}
+// customRawDefs 변경 시 이미 그려진 성분 선택 select들도 갱신
+function refreshMixGasOptionLists() {
+  document.querySelectorAll('select.mix-gas-sel').forEach(sel => {
+    const cur = sel.value;
+    sel.innerHTML = mixGasSelOptionsHtml();
+    if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
+  });
+}
+
 function addMixRow() {
   const rows = document.querySelectorAll('#mixRows .mix-row');
   if (rows.length >= 3) { alert('성분은 최대 3개까지 입력할 수 있습니다.'); return; }
@@ -3247,9 +3336,7 @@ function addMixRow() {
   div.style.cssText = 'display:grid;grid-template-columns:1fr 90px 52px 28px;gap:6px;align-items:center;margin-bottom:6px;';
   div.innerHTML = `
     <select class="mix-gas-sel" onchange="handleMixSelChange(this);updateMixPreviewLegacy()">
-      <option value="">성분 선택</option>
-      <option>H₂ (수소)</option><option>He (헬륨)</option><option>N₂ (질소)</option><option>O₂ (산소)</option><option>Ar (아르곤)</option><option>CO₂</option><option>CH₄ (메탄)</option><option>Novec 7100</option>
-      <option>직접입력</option>
+      ${mixGasSelOptionsHtml()}
     </select>
     <input type="number" class="mix-pct-inp" min="0" max="100" step="0.001" placeholder="%" oninput="updateMixPreviewLegacy()" style="text-align:right">
     <label style="display:flex;align-items:center;justify-content:center;gap:4px;font-size:11px;color:var(--text2);cursor:pointer;font-weight:400">
@@ -3502,7 +3589,10 @@ function initProdPage() {
 }
 
 // ══════════════ 생산 혼합가스 구성 모달 (pmix prefix - legacy mix와 분리) ══════════════
-const PMIX_GASES = ['He', 'N₂', 'O₂', 'Ar', 'CO₂', 'H₂', 'CH₄', 'CO', 'SF₆', 'C₃H₈'];
+const PMIX_GASES_BASE = ['He', 'N₂', 'O₂', 'Ar', 'CO₂', 'H₂', 'CH₄'];
+function getPmixGases() {
+  return [...PMIX_GASES_BASE, ...customRawDefs.map(d => d.symbol)];
+}
 
 // 모달이 어느 select에서 열렸는지 추적
 let pmixTargetSel = 'prodGas';
@@ -3596,7 +3686,7 @@ function addPmixRow() {
     <span class="pmix-num" style="font-size:11px;color:var(--text3);font-family:var(--mono);width:20px">${idx+1}.</span>
     <select class="pmix-gas" style="flex:1" onchange="updatePmix()">
       <option value="">성분</option>
-      ${PMIX_GASES.map(g => `<option>${g}</option>`).join('')}
+      ${getPmixGases().map(g => `<option>${g}</option>`).join('')}
     </select>
     <input type="number" class="pmix-pct" placeholder="%" step="0.01" min="0" max="100"
       style="width:80px;text-align:right" oninput="updatePmix()">
@@ -4854,9 +4944,7 @@ function addBase() {
   document.getElementById('mixRows').innerHTML = `
     <div class="mix-row" style="display:grid;grid-template-columns:1fr 90px 52px 28px;gap:6px;align-items:center;margin-bottom:6px;">
       <select class="mix-gas-sel" onchange="handleMixSelChange(this);updateMixPreviewLegacy()">
-        <option value="">성분 선택</option>
-        <option>H₂ (수소)</option><option>He (헬륨)</option><option>N₂ (질소)</option><option>O₂ (산소)</option><option>Ar (아르곤)</option><option>CO₂</option><option>CH₄ (메탄)</option><option>Novec 7100</option>
-        <option>직접입력</option>
+        ${mixGasSelOptionsHtml()}
       </select>
       <input type="number" class="mix-pct-inp" min="0" max="100" step="0.001" placeholder="%" oninput="updateMixPreviewLegacy()" style="text-align:right">
       <label style="display:flex;align-items:center;justify-content:center;gap:4px;font-size:11px;color:var(--text2);cursor:pointer;font-weight:400">
@@ -5972,6 +6060,13 @@ function applySogeup() {
   alert(`✅ 소급 차감 완료!\nHe: ${totals.He.toFixed(2)}kg / N₂: ${totals.N2.toFixed(2)}kg / Ar: ${totals.Ar.toFixed(2)}kg\n생산 ${prodCount}건 반영`);
 }
 
+// 커스텀 등록 원재료 조회 (key 또는 성분기호로 매칭)
+function findCustomRawDef(keyOrSym) {
+  if (!keyOrSym) return null;
+  const s = String(keyOrSym).toUpperCase();
+  return customRawDefs.find(d => (d.key||'').toUpperCase() === s || (d.symbol||'').toUpperCase() === s) || null;
+}
+
 // 성분 기호 → 원재료 키 매핑
 function symToRawKey(sym) {
   const s = sym.toUpperCase();
@@ -5982,6 +6077,8 @@ function symToRawKey(sym) {
   if (s === 'O₂' || s === 'O2') return 'O2';
   if (s === 'CO₂' || s === 'CO2') return 'CO2';
   if (s === 'CH₄' || s === 'CH4') return 'CH4';
+  const custom = findCustomRawDef(sym);
+  if (custom) return custom.key;
   return null;
 }
 
@@ -5994,6 +6091,8 @@ function m3ToKg(m3, key) {
   if (key === 'O2')  return m3 * O2_DENSITY;
   if (key === 'CO2') return m3 * CO2_DENSITY;
   if (key === 'CH4') return m3 * CH4_DENSITY;
+  const custom = findCustomRawDef(key);
+  if (custom) return m3 * custom.density;
   return 0;
 }
 
@@ -6177,6 +6276,39 @@ function deductRawFromProduction(consumption) {
         const totalRemaining = mat.tanks.reduce((s,t) => s + t.kg_remaining, 0);
         deducted.push({ ...c, src:'Tank', tankNo: tank.no, remainKg: totalRemaining, warn });
       }
+
+    } else {
+      // 커스텀 등록 원재료 (관리자 > 커스텀 원재료 등록)
+      const def = findCustomRawDef(c.key);
+      if (!def) return; // 매핑 불가 성분은 스킵
+
+      if (def.formType === 'cyl') {
+        // 실린더(병) 단위 — H2/O2/CH4와 동일한 병 개봉 로직
+        const kgPerBtl = pvtM3(def.cylVol || CYL_VOL_L, def.cylBar || CYL_FILL_BAR) * def.density;
+        const cur = rawMaterials[c.key] || { btl:0, kg:0 };
+        let remKg = cur.kg, remBtl = cur.btl, needKg = kgNeed, usedBtl = 0;
+        while (needKg > 0) {
+          if (remKg >= needKg) { remKg -= needKg; needKg = 0; }
+          else {
+            needKg -= remKg; remKg = 0;
+            if (remBtl > 0) { remBtl--; usedBtl++; remKg = kgPerBtl; }
+            else { warn = `⚠️ ${def.label} 재고 부족`; break; }
+          }
+        }
+        if (def.wasteKg > 0 && remKg > 0 && remKg <= def.wasteKg) {
+          warn = (warn||'') + ` 💡 ${def.label} 잔량 부족 → 1병 폐기`;
+          remBtl--; remKg = 0;
+        }
+        rawMaterials[c.key] = { btl: Math.max(0, remBtl), kg: Math.max(0, remKg) };
+        deducted.push({ ...c, usedBtl, remainKg: Math.max(0, remKg), remainBtl: Math.max(0, remBtl), warn });
+      } else {
+        // 벌크(kg) 단위 — CO2와 동일한 스칼라 kg 차감
+        let remKg = rawMaterials[c.key] || 0;
+        remKg = Math.max(0, remKg - kgNeed);
+        if (remKg <= 0 && kgNeed > (rawMaterials[c.key] || 0)) warn = `⚠️ ${def.label} 재고 부족`;
+        rawMaterials[c.key] = remKg;
+        deducted.push({ ...c, remainKg: remKg, warn });
+      }
     }
   });
 
@@ -6247,7 +6379,8 @@ function onRawGasSelChange() {
     tankNoLabel.innerHTML = `${prefix} 탱크 번호 <span style="color:var(--text3);font-size:10px;font-weight:400">(예: ${prefix}-2026-04-A)</span>`;
   }
 
-  if (gas === 'H2' || gas === 'O2' || gas === 'CH4') {
+  const customDef = findCustomRawDef(gas);
+  if (gas === 'H2' || gas === 'O2' || gas === 'CH4' || customDef?.formType === 'cyl') {
     lbl.textContent = '입고 수량 (병)';
     inp.step = '1'; inp.placeholder = '병 수';
   } else if (gas === 'He_tank' || gas === 'N2' || gas === 'Ar') {
@@ -6325,6 +6458,30 @@ function addRawMaterial() {
     cartLogs.push({ id:uid(), date:_co2Date, time:now(), type:'raw_in',
       gas, kg, note, memo:`CO₂ 원재료 +${kg}kg` });
 
+  } else if (findCustomRawDef(gas)) {
+    // 커스텀 등록 원재료
+    const def = findCustomRawDef(gas);
+    const _cusDate = document.getElementById('rawInDate').value || today();
+    if (def.formType === 'cyl') {
+      const qty = parseFloat(document.getElementById('rawKg').value);
+      if (!qty||qty<=0) { alert('병 수를 입력해주세요.'); return; }
+      const btlQty = Math.round(qty);
+      const kgPerBtl = pvtM3(def.cylVol || CYL_VOL_L, def.cylBar || CYL_FILL_BAR) * def.density;
+      const cur = rawMaterials[gas] || { btl:0, kg:0 };
+      rawMaterials[gas] = { btl: cur.btl+btlQty, kg: cur.kg };
+      save(STORE_KEY_RAW, rawMaterials);
+      cartLogs.push({ id:uid(), date:_cusDate, time:now(), type:'raw_in',
+        gas, btl:btlQty, kg:Math.round(btlQty*kgPerBtl*100)/100, note,
+        memo:`${def.label} 원재료 +${btlQty}병` });
+    } else {
+      const kg = parseFloat(document.getElementById('rawKg').value);
+      if (!kg||kg<=0) { alert('kg를 입력해주세요.'); return; }
+      rawMaterials[gas] = (rawMaterials[gas]||0) + kg;
+      save(STORE_KEY_RAW, rawMaterials);
+      cartLogs.push({ id:uid(), date:_cusDate, time:now(), type:'raw_in',
+        gas, kg, note, memo:`${def.label} 원재료 +${kg}kg` });
+    }
+
   } else {
     // N₂, Ar — tanks 배열에 추가
     const kg = parseFloat(document.getElementById('rawKg').value);
@@ -6357,6 +6514,107 @@ function addRawMaterial() {
   renderRawTiles();
   renderCylRawTiles();
   hideRawInModal();
+}
+
+// ══════ 커스텀 원재료 등록 (관리자) ══════
+function craFormChange() {
+  const form = document.getElementById('craForm').value;
+  document.getElementById('craCylVolField').style.display = form === 'cyl' ? 'block' : 'none';
+  document.getElementById('craCylBarField').style.display = form === 'cyl' ? 'block' : 'none';
+  document.getElementById('craWasteField').style.display  = form === 'cyl' ? 'block' : 'none';
+}
+function craCalcDensity() {
+  const molar = parseFloat(document.getElementById('craMolar').value);
+  if (!molar || molar <= 0) return;
+  // 0℃·1atm 기준 이상기체 몰부피 22.414 L/mol
+  document.getElementById('craDensity').value = (molar / 22.414).toFixed(4);
+}
+
+function addCustomRawGas() {
+  const symbol = document.getElementById('craSym').value.trim();
+  const label  = document.getElementById('craLabel').value.trim() || symbol;
+  const molarMass = parseFloat(document.getElementById('craMolar').value) || null;
+  const density   = parseFloat(document.getElementById('craDensity').value);
+  const formType  = document.getElementById('craForm').value;
+  const cylVol    = parseFloat(document.getElementById('craCylVol').value) || null;
+  const cylBar    = parseFloat(document.getElementById('craCylBar').value) || null;
+  const wasteKg   = parseFloat(document.getElementById('craWasteKg').value) || 0;
+
+  if (!symbol) { alert('성분 기호를 입력해주세요. (예: CO)'); return; }
+  if (!label.toUpperCase().startsWith(symbol.toUpperCase())) {
+    alert('표시명은 성분 기호로 시작해야 합니다. (예: "CO (일산화탄소)")'); return;
+  }
+  if (!density || density <= 0) { alert('밀도를 입력하거나 분자량을 입력해 자동계산해주세요.'); return; }
+  if (formType === 'cyl' && (!cylVol || !cylBar)) { alert('실린더 규격(L)과 충전압력(bar)을 입력해주세요.'); return; }
+  if (findCustomRawDef(symbol) || getRawKey(label) || symToRawKey(symbol)) {
+    alert('이미 사용 중인 성분 기호입니다. 다른 기호를 사용해주세요.'); return;
+  }
+
+  customRawDefs.push({
+    id: uid(), key: symbol, symbol, label, molarMass, density, formType,
+    cylVol: formType === 'cyl' ? cylVol : null,
+    cylBar: formType === 'cyl' ? cylBar : null,
+    wasteKg: formType === 'cyl' ? wasteKg : 0,
+    createdAt: now()
+  });
+  save(STORE_KEY_CUSTOMRAW, customRawDefs);
+
+  ['craSym','craLabel','craMolar','craDensity','craCylVol','craCylBar','craWasteKg'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.value = '';
+  });
+  document.getElementById('craForm').value = 'kg';
+  craFormChange();
+
+  refreshMixGasOptionLists();
+  refreshRawGasSelOptions();
+  renderCustomRawList();
+  alert(`✅ "${label}" 원재료 등록 완료!\n혼합가스 성분 선택 목록과 원재료 입고 화면에 추가되었습니다.`);
+}
+
+function deleteCustomRawGas(id) {
+  const def = customRawDefs.find(d => d.id === id);
+  if (!def) return;
+  if (!confirm(`"${def.label}"을(를) 삭제하시겠습니까?\n등록된 재고 데이터는 남아있지만, 혼합가스 성분 선택에서는 사라집니다.`)) return;
+  customRawDefs = customRawDefs.filter(d => d.id !== id);
+  save(STORE_KEY_CUSTOMRAW, customRawDefs);
+  refreshMixGasOptionLists();
+  refreshRawGasSelOptions();
+  renderCustomRawList();
+}
+
+function renderCustomRawList() {
+  const wrap = document.getElementById('customRawList');
+  if (!wrap) return;
+  if (!customRawDefs.length) {
+    wrap.innerHTML = '<p style="color:var(--text3);font-size:13px;text-align:center;padding:10px 0">등록된 커스텀 원재료가 없습니다</p>';
+    return;
+  }
+  wrap.innerHTML = customRawDefs.map(d => {
+    const cur = rawMaterials[d.key];
+    const stockStr = d.formType === 'cyl'
+      ? `${(cur && cur.btl) || 0}병`
+      : `${(typeof cur === 'number' ? cur : 0).toFixed(2)}kg`;
+    return `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid var(--border);font-size:12px">
+      <strong>${d.label}</strong>
+      <span style="color:var(--text3)">밀도 ${d.density.toFixed(4)}kg/Nm³${d.molarMass ? ` (분자량 ${d.molarMass}g/mol)` : ''}</span>
+      <span style="color:var(--text3)">${d.formType==='cyl' ? `실린더 ${d.cylVol}L/${d.cylBar}bar` : '벌크(kg)'}</span>
+      <span style="color:var(--accent)">현재고 ${stockStr}</span>
+      <div class="spacer"></div>
+      <button class="btn btn-sm btn-danger" onclick="deleteCustomRawGas('${d.id}')">삭제</button>
+    </div>`;
+  }).join('');
+}
+
+// customRawDefs 변경 시 원재료 입고 select의 커스텀 optgroup 갱신
+function refreshRawGasSelOptions() {
+  const group = document.getElementById('rawGasSelCustomGroup');
+  if (!group) return;
+  if (!customRawDefs.length) { group.style.display = 'none'; group.innerHTML = ''; return; }
+  group.style.display = 'block';
+  group.innerHTML = customRawDefs.map(d => {
+    const unit = d.formType === 'cyl' ? `병 (${d.cylVol}L/${d.cylBar}bar)` : 'kg';
+    return `<option value="${d.key}">${d.label} — ${unit}</option>`;
+  }).join('');
 }
 
 // ── ISO Tank 반납(출고) — 현재 잔량만큼 마이너스 처리 후 탱크 제거
@@ -7766,7 +8024,10 @@ const SINGLE_GAS_LIST = [
   'CH₄ (메탄)','CO₂','O₂ (산소)','H₂ (수소)'
 ];
 const INC_SIZE_LIST = ['10L','40L','47L','47L×12BT (렉)','176L'];
-const INC_MIX_GASES = ['H₂ (수소)','He (헬륨)','N₂ (질소)','O₂ (산소)','Ar (아르곤)','CO₂','CH₄ (메탄)','Novec 7100'];
+const INC_MIX_GASES_BASE = ['H₂ (수소)','He (헬륨)','N₂ (질소)','O₂ (산소)','Ar (아르곤)','CO₂','CH₄ (메탄)'];
+function getIncMixGases() {
+  return [...INC_MIX_GASES_BASE, ...customRawDefs.map(d => d.label)];
+}
 
 function incCompOptions() {
   const invComps = [...new Set(inventory.map(r=>r.company).filter(Boolean))];
@@ -7903,7 +8164,7 @@ function incAddCompRow(group) {
   gasSel.className = 'mix-comp-gas';
   gasSel.style.cssText = 'flex:1;font-size:13px;padding:5px 8px';
   gasSel.innerHTML = '<option value="">성분 선택</option>' +
-    INC_MIX_GASES.map(g => `<option value="${g}">${g}</option>`).join('') +
+    getIncMixGases().map(g => `<option value="${g}">${g}</option>`).join('') +
     '<option value="__direct__">직접입력...</option>';
 
   // 직접입력 필드 (숨김)
@@ -11297,13 +11558,13 @@ function resetAll() {
   if (!confirm('정말로 삭제합니다. 마지막 확인입니다.')) return;
   const allKeys = [STORE_KEY_INV, STORE_KEY_LOG, STORE_KEY_RAW,
     STORE_KEY_CART, STORE_KEY_CART_LOG, STORE_KEY_CLIENTS,
-    STORE_KEY_EXPIRE, STORE_KEY_ANALYSIS, STORE_KEY_INCOMING, STORE_KEY_ORDERS];
+    STORE_KEY_EXPIRE, STORE_KEY_ANALYSIS, STORE_KEY_INCOMING, STORE_KEY_ORDERS, STORE_KEY_CUSTOMRAW];
   allKeys.forEach(k => {
     localStorage.removeItem(k);
     if (window.fsSave) window.fsSave(k, []); // Firebase도 빈 배열로 초기화
   });
   inventory = []; logs = []; cartridges = []; cartLogs = []; clients = [];
-  orders = []; analysisData = []; incomingLogs = []; expireSettings = [];
+  orders = []; analysisData = []; incomingLogs = []; expireSettings = []; customRawDefs = [];
   rawMaterials = { He:{tank_kg:0,cart_m3:0}, N2:0, Ar:0, H2:{btl:0,kg:0}, O2:{btl:0,kg:0}, CO2:0 };
   renderAll();
   renderClientList();
