@@ -1590,6 +1590,7 @@ console.log('✅ Firebase 초기화 완료');
         <input type="date" id="ordHistFrom" onchange="renderOrderHist()" style="font-size:12px;width:135px" title="조회 시작일">
         <span style="color:var(--text3);font-size:12px">~</span>
         <input type="date" id="ordHistTo" onchange="renderOrderHist()" style="font-size:12px;width:135px" title="조회 종료일">
+        <button class="btn btn-sm btn-primary" onclick="renderOrderHist()">🔍 조회</button>
         <button class="btn btn-sm" style="background:var(--bg4);border:1px solid var(--border2);color:var(--text2)" onclick="resetOrdHistDate()">전체기간</button>
         <select id="ordHistFilter" onchange="renderOrderHist()" style="font-size:12px;width:120px">
           <option value="">전체 상태</option>
@@ -1678,7 +1679,16 @@ console.log('✅ Firebase 초기화 완료');
   </div>
 
   <div class="card">
-    <div class="sec-h">오늘의 입출고 내역</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+      <div class="sec-h" style="margin-bottom:0">입출고 내역</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <input type="date" id="todayLogFrom" style="font-size:12px;width:135px" title="조회 시작일">
+        <span style="color:var(--text3);font-size:12px">~</span>
+        <input type="date" id="todayLogTo" style="font-size:12px;width:135px" title="조회 종료일">
+        <button class="btn btn-sm btn-primary" onclick="renderTodayLog()">🔍 조회</button>
+        <button class="btn btn-sm" style="background:var(--bg4);border:1px solid var(--border2);color:var(--text2)" onclick="resetTodayLogDate()">오늘</button>
+      </div>
+    </div>
     <div id="todayLog">
       <p style="color:var(--text3);font-size:13px;text-align:center;padding:20px 0">오늘 입력된 내역이 없습니다</p>
     </div>
@@ -5357,20 +5367,39 @@ function saveTxn() {
   alert('✅ 저장되었습니다.');
 }
 
+function resetTodayLogDate() {
+  const t = today();
+  document.getElementById('todayLogFrom').value = t;
+  document.getElementById('todayLogTo').value   = t;
+  renderTodayLog();
+}
+
 function renderTodayLog() {
   const t = today();
-  const todays = logs.filter(l => l.date === t).slice().reverse();
+  const fromEl = document.getElementById('todayLogFrom');
+  const toEl   = document.getElementById('todayLogTo');
+  // 최초 진입 시 기본값을 오늘로 설정
+  if (fromEl && !fromEl.value) fromEl.value = t;
+  if (toEl   && !toEl.value)   toEl.value   = t;
+  const from = fromEl ? fromEl.value : t;
+  const to   = toEl   ? toEl.value   : t;
+
+  const todays = logs
+    .filter(l => (!from || l.date >= from) && (!to || l.date <= to))
+    .slice().reverse();
   const wrap = document.getElementById('todayLog');
   if (!todays.length) {
-    wrap.innerHTML = `<p style="color:var(--text3);font-size:13px;text-align:center;padding:20px 0">오늘 입력된 내역이 없습니다</p>`;
+    wrap.innerHTML = `<p style="color:var(--text3);font-size:13px;text-align:center;padding:20px 0">해당 기간에 입력된 내역이 없습니다</p>`;
     return;
   }
+  const showDate = from !== to;
   wrap.innerHTML = todays.map(l => {
     const cls = l.type === 'produce' ? 'type-prod' : l.type === 'ship' ? 'type-out' : 'type-adj';
     const fSign = l.dFull >= 0 ? '+' : '';
     const eSign = l.dEmpty >= 0 ? '+' : '';
+    const timeStr = showDate ? `${l.date} ${l.time.split(' ')[1] || l.time}` : (l.time.split(' ')[1] || l.time);
     return `<div class="log-row">
-      <span class="log-time">${l.time.split(' ')[1] || l.time}</span>
+      <span class="log-time" style="${showDate ? 'min-width:170px' : ''}">${timeStr}</span>
       <span class="log-type"><span class="tag ${l.type==='produce'?'tag-full':l.type==='ship'?'tag-empty':'tag-gas'}">${l.typeLabel}</span></span>
       <span class="log-msg">${l.gas} ${l.size} · ${l.company}${l.memo?' · '+l.memo:''}</span>
       <span class="log-qty ${cls}">실병 ${fSign}${l.dFull} / 공병 ${eSign}${l.dEmpty}</span>
