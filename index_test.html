@@ -521,6 +521,7 @@ console.log('✅ Firebase 초기화 완료');
             <option value="H2">H₂ (수소) — 병 (47L/130bar)</option>
             <option value="O2">O₂ (산소) — 병 (47L/130bar)</option>
             <option value="CO2">CO₂ — kg (20kg/병)</option>
+            <option value="CH4">CH₄ (메탄) — 병 (47L/120bar)</option>
           </optgroup>
         </select>
       </div>
@@ -2653,6 +2654,7 @@ migrateToTanks('Ar');
 save(STORE_KEY_RAW, rawMaterials);
 const HE_KG_TO_M3 = 6.03, N2_KG_TO_M3 = 0.799, AR_KG_TO_M3 = 0.561;
 const H2_DENSITY = 0.0838, O2_DENSITY = 1.308;
+const CH4_DENSITY = 0.668, CH4_FILL_BAR = 120; // CH4는 47L/120bar 실린더로 입고, 별도 폐기 기준 없음
 // 액체가스 밀도 (kg/L) — 실측 기준: LHe 100L=15.6kg, LN₂/LAr 176L=120kg/192kg
 const LHE_LIQ_DENSITY = 15.6 / 100;
 const LN2_LIQ_DENSITY = 120 / 176;
@@ -5979,6 +5981,7 @@ function symToRawKey(sym) {
   if (s === 'H₂' || s === 'H2') return 'H2';
   if (s === 'O₂' || s === 'O2') return 'O2';
   if (s === 'CO₂' || s === 'CO2') return 'CO2';
+  if (s === 'CH₄' || s === 'CH4') return 'CH4';
   return null;
 }
 
@@ -5990,6 +5993,7 @@ function m3ToKg(m3, key) {
   if (key === 'H2')  return m3 * H2_DENSITY;
   if (key === 'O2')  return m3 * O2_DENSITY;
   if (key === 'CO2') return m3 * CO2_DENSITY;
+  if (key === 'CH4') return m3 * CH4_DENSITY;
   return 0;
 }
 
@@ -6040,9 +6044,12 @@ function deductRawFromProduction(consumption) {
     const kgNeed = c.kgTotal;
     let warn = null;
 
-    if (c.key === 'H2' || c.key === 'O2') {
+    if (c.key === 'H2' || c.key === 'O2' || c.key === 'CH4') {
       // 실린더 원재료: kg → 필요 병 수 계산
-      const kgPerBtl  = cylKgPerBtl(c.key === 'H2' ? H2_DENSITY : O2_DENSITY);
+      // CH4는 47L/120bar 실린더로 입고되며 별도 폐기 기준 없이 전량 사용
+      const kgPerBtl  = c.key === 'CH4'
+        ? pvtM3(CYL_VOL_L, CH4_FILL_BAR) * CH4_DENSITY
+        : cylKgPerBtl(c.key === 'H2' ? H2_DENSITY : O2_DENSITY);
       const btlNeeded = kgNeed / kgPerBtl;
       const btlWhole  = Math.ceil(btlNeeded); // 올림 (병 단위)
       const cur = rawMaterials[c.key] || { btl:0, kg:0 };
@@ -6071,13 +6078,14 @@ function deductRawFromProduction(consumption) {
         }
       }
 
-      // 잔량이 폐기 기준 이하면 병 차감
-      const wasteKgThreshold = c.key === 'H2' ? cylM3PerBtl()*H2_DENSITY*(10/130) : cylM3PerBtl()*O2_DENSITY*(10/130);
-      const wastePressureKg  = pvtM3(CYL_VOL_L, CYL_WASTE_BAR) * (c.key === 'H2' ? H2_DENSITY : O2_DENSITY);
-      if (remKg > 0 && remKg <= wastePressureKg) {
-        warn = (warn||'') + ` 💡 ${c.key} 잔압 부족 (${remKg.toFixed(2)}kg ≈ ${(remKg/( c.key==='H2'?H2_DENSITY:O2_DENSITY)/CYL_VOL_L*ATM_KGF*1000/98.0665/25/273.15*25+273.15).toFixed(1)}bar 추정) → 1병 폐기`;
-        remBtl--;
-        remKg = 0;
+      // 잔량이 폐기 기준 이하면 병 차감 (CH4는 폐기 기준 없이 0kg까지 그대로 사용)
+      if (c.key !== 'CH4') {
+        const wastePressureKg  = pvtM3(CYL_VOL_L, CYL_WASTE_BAR) * (c.key === 'H2' ? H2_DENSITY : O2_DENSITY);
+        if (remKg > 0 && remKg <= wastePressureKg) {
+          warn = (warn||'') + ` 💡 ${c.key} 잔압 부족 (${remKg.toFixed(2)}kg ≈ ${(remKg/( c.key==='H2'?H2_DENSITY:O2_DENSITY)/CYL_VOL_L*ATM_KGF*1000/98.0665/25/273.15*25+273.15).toFixed(1)}bar 추정) → 1병 폐기`;
+          remBtl--;
+          remKg = 0;
+        }
       }
 
       rawMaterials[c.key] = { btl: Math.max(0, remBtl), kg: Math.max(0, remKg) };
@@ -6239,7 +6247,7 @@ function onRawGasSelChange() {
     tankNoLabel.innerHTML = `${prefix} 탱크 번호 <span style="color:var(--text3);font-size:10px;font-weight:400">(예: ${prefix}-2026-04-A)</span>`;
   }
 
-  if (gas === 'H2' || gas === 'O2') {
+  if (gas === 'H2' || gas === 'O2' || gas === 'CH4') {
     lbl.textContent = '입고 수량 (병)';
     inp.step = '1'; inp.placeholder = '병 수';
   } else if (gas === 'He_tank' || gas === 'N2' || gas === 'Ar') {
@@ -6293,11 +6301,13 @@ function addRawMaterial() {
       gas:'He_cart', m3: Math.round(m3*10000)/10000, kg:Math.round(kg*1000)/1000,
       note, memo:`He 카트리지 입고 +${m3.toFixed(4)}m³` });
 
-  } else if (gas === 'H2' || gas === 'O2') {
+  } else if (gas === 'H2' || gas === 'O2' || gas === 'CH4') {
     const qty = parseFloat(document.getElementById('rawKg').value);
     if (!qty||qty<=0) { alert('병 수를 입력해주세요.'); return; }
     const btlQty = Math.round(qty);
-    const kgPerBtl = cylKgPerBtl(gas==='H2'?H2_DENSITY:O2_DENSITY);
+    const kgPerBtl = gas === 'CH4'
+      ? pvtM3(CYL_VOL_L, CH4_FILL_BAR) * CH4_DENSITY
+      : cylKgPerBtl(gas==='H2'?H2_DENSITY:O2_DENSITY);
     const cur = rawMaterials[gas] || { btl:0, kg:0 };
     rawMaterials[gas] = { btl: cur.btl+btlQty, kg: cur.kg };
     save(STORE_KEY_RAW, rawMaterials);
@@ -6496,13 +6506,11 @@ function renderCylRawTiles() {
   const wrap = document.getElementById('cylRawTiles');
   if (!wrap) return;
 
-  const CH4_DENSITY = 0.668;
   const h2KgPerBtl  = cylKgPerBtl(H2_DENSITY);
   const o2KgPerBtl  = cylKgPerBtl(O2_DENSITY);
-  const ch4KgPerBtl = cylKgPerBtl(CH4_DENSITY);
+  const ch4KgPerBtl = pvtM3(CYL_VOL_L, CH4_FILL_BAR) * CH4_DENSITY;
   const h2WasteKg   = pvtM3(CYL_VOL_L, CYL_WASTE_BAR) * H2_DENSITY;
   const o2WasteKg   = pvtM3(CYL_VOL_L, CYL_WASTE_BAR) * O2_DENSITY;
-  const ch4WasteKg  = pvtM3(CYL_VOL_L, CYL_WASTE_BAR) * CH4_DENSITY;
 
   const cylInfo = [
     { label:'H₂ 공업용',  key:'H2_industrial',  color:'#f0883e', kgPerBtl:h2KgPerBtl,     unit:'47L/130bar', wasteKg:h2WasteKg },
@@ -6511,7 +6519,7 @@ function renderCylRawTiles() {
     { label:'O₂ 고순도',  key:'O2_pure',         color:'#39d353', kgPerBtl:o2KgPerBtl,     unit:'47L/130bar', wasteKg:o2WasteKg },
     { label:'CO₂ 공업용', key:'CO2_industrial', color:'#58a6ff', kgPerBtl:CO2_KG_PER_BTL, unit:'20kg/병',   wasteKg:CO2_WASTE_KG },
     { label:'CO₂ 고순도', key:'CO2_pure',        color:'#58a6ff', kgPerBtl:CO2_KG_PER_BTL, unit:'20kg/병',   wasteKg:CO2_WASTE_KG },
-    { label:'CH₄ (메탄)', key:'CH4',             color:'#b08060', kgPerBtl:ch4KgPerBtl,   unit:'47L/130bar', wasteKg:ch4WasteKg },
+    { label:'CH₄ (메탄)', key:'CH4',             color:'#b08060', kgPerBtl:ch4KgPerBtl,   unit:'47L/120bar', wasteKg:0 },
   ];
 
   wrap.innerHTML = cylInfo.map(g => {
@@ -6531,7 +6539,7 @@ function renderCylRawTiles() {
         <span style="font-size:11px;color:var(--text3)">병</span>
         <span style="font-size:11px;color:var(--text3);margin-left:4px">= ${kgAvail.toFixed(2)} kg</span>
       </div>
-      <div style="font-size:10px;color:var(--text3);margin-bottom:5px">1병=${g.kgPerBtl.toFixed(2)}kg / 폐기기준 ${g.wasteKg.toFixed(1)}kg</div>
+      <div style="font-size:10px;color:var(--text3);margin-bottom:5px">1병=${g.kgPerBtl.toFixed(2)}kg${g.wasteKg > 0 ? ` / 폐기기준 ${g.wasteKg.toFixed(1)}kg` : ' / 전량 사용 (폐기기준 없음)'}</div>
       ${warnLow ? `<div style="font-size:11px;color:var(--warn);font-weight:700">⚠️ 잔량 부족 — 교체 필요</div>` : ''}
       <div style="height:4px;background:var(--bg4);border-radius:2px;margin-bottom:8px">
         <div style="height:4px;width:${pct}%;background:${barColor};border-radius:2px;transition:width .3s"></div>
