@@ -5961,8 +5961,18 @@ function parseMixComponents(gasName) {
 
 
 // ── 혼합가스 품명 변환 헬퍼 ──────────────────────────────────
+// 각인 전용 표기 판별 — "혼합 [H2 / N2 / CO2]"처럼 농도(%)나 Balance 없이
+// 성분명만 있는 경우 = 실린더 각인 정보이므로 변환하지 않고 그대로 유지해야 함
+function isEngravingBracket(oldName) {
+  if (!oldName || !oldName.startsWith('혼합')) return false;
+  const m = oldName.match(/\[(.+)\]/);
+  if (!m) return false;
+  const parts = m[1].split('/').map(s => s.trim());
+  return parts.length > 0 && parts.every(s => !/%|balance/i.test(s));
+}
 function convertMixName(oldName) {
   if (!oldName || !oldName.startsWith('혼합')) return oldName;
+  if (isEngravingBracket(oldName)) return oldName; // 각인 표기는 변환하지 않음
   const m = oldName.match(/\[(.+)\]/);
   if (!m) return oldName;
   const parts = m[1].split('/').map(s => s.trim());
@@ -5989,7 +5999,8 @@ function migrateMixGasItem(item) {
   if (!item || !item.gas) return false;
   let changed = false;
   if (item.gas.startsWith('혼합')) {
-    item.gas = convertMixName(item.gas); changed = true;
+    const converted = convertMixName(item.gas);
+    if (converted !== item.gas) { item.gas = converted; changed = true; }
   } else if (isMixGas(item.gas)) {
     const f = stripLastPct(item.gas);
     if (f !== item.gas) { item.gas = f; changed = true; }
