@@ -402,6 +402,7 @@ console.log('✅ Firebase 초기화 완료');
 
 <nav class="nav">
   <button class="nav-btn active" onclick="nav('dash')">📊 현황 대시보드</button>
+  <button class="nav-btn" id="navJulyBase" onclick="nav('julybase')" style="display:none;color:var(--warn)">🗓 7월 시작 재고 확정</button>
   <button class="nav-btn" onclick="nav('base')">⚙️ 기초재고 설정</button>
   <button class="nav-btn" onclick="nav('prod')">🏭 일일 생산 입력</button>
   <button class="nav-btn" onclick="nav('cart')">🔧 카트리지 충전</button>
@@ -615,6 +616,89 @@ console.log('✅ Firebase 초기화 완료');
         <thead id="dashThead"></thead>
         <tbody id="dashBody"></tbody>
       </table>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════ JULY BASE (7월 시작 재고 확정, 1회용) ══════════════ -->
+<div class="page" id="page-julybase">
+  <div class="alert alert-warn">
+    📌 이 탭은 <strong>7월 1일 기준 실제 장부/실사 재고를 시스템에 반영</strong>하기 위한 <strong>일회용 설정 화면</strong>입니다.<br>
+    아래에서 완제품 재고 수량을 실제 값으로 맞추고, 업체별 각인 공병 재고를 등록한 뒤 맨 아래 <strong>"확정 완료"</strong> 버튼을 누르면 이 탭은 사라지고,
+    이후로는 평소처럼 생산/출고/공병입고 화면에서 이어서 사용하시면 됩니다.
+  </div>
+  <div class="alert alert-info">
+    ⚠️ 지금까지 쌓인 생산·출고 이력은 전혀 건드리지 않습니다. 오직 <strong>현재 시점의 재고 수량</strong>만 실제 값으로 맞추는 화면입니다.
+  </div>
+
+  <!-- 현재 상태 요약 -->
+  <div class="card">
+    <div class="sec-h">현재 재고 현황 요약</div>
+    <div class="summary-grid" id="julyBaseSummary"></div>
+  </div>
+
+  <!-- 완제품 재고 일괄 수정 -->
+  <div class="card">
+    <div class="sec-h">① 완제품 재고 실사값 입력</div>
+    <div class="alert alert-info" style="margin-bottom:12px">장부/실사 기준 실병·공병 수량을 입력하고 각 행의 저장을 눌러주세요.</div>
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+      <label style="font-size:12px;color:var(--text3)">업체별 조회:</label>
+      <select id="julyBaseCoFilter" style="width:200px" onchange="renderJulyBaseFinished()">
+        <option value="">전체 보기</option>
+      </select>
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>가스</th><th>규격</th><th>업체</th><th style="width:90px">실병</th><th style="width:90px">공병</th><th style="width:70px"></th></tr></thead>
+        <tbody id="julyBaseFinishedBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- 각인 공병 등록 -->
+  <div class="card">
+    <div class="sec-h">② 업체별 각인 공병 등록</div>
+    <div class="alert alert-info" style="margin-bottom:12px">
+      혼합가스는 제품명이 아니라 <strong>실린더에 각인된 성분</strong> 기준으로 생산 가능 여부가 결정됩니다.
+      업체에 실제로 보유 중인 각인 공병을 성분 조합별로 등록해주세요. (예: H₂/N₂/CO₂ 각인 공병 10개)
+    </div>
+    <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:12px">
+      <div class="field">
+        <label>업체</label>
+        <select id="jbEngComp" style="width:100%"><option value="">선택</option></select>
+      </div>
+      <div class="field">
+        <label>실린더 규격</label>
+        <select id="jbEngSize" style="width:100%">
+          <option value="">선택</option>
+          <option value="10L">10L</option><option value="40L">40L</option><option value="47L">47L</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>수량 (개)</label>
+        <input type="number" id="jbEngQty" min="1" step="1" value="1" style="width:100%">
+      </div>
+    </div>
+    <div class="field" style="margin-bottom:12px">
+      <label>각인 성분 (여러 개 선택 — 실제 실린더 몸체에 각인된 성분 전부)</label>
+      <div id="jbEngComps" style="display:flex;flex-wrap:wrap;gap:10px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px"></div>
+    </div>
+    <div class="flex-end">
+      <button class="btn btn-success" onclick="addJulyBaseEngraving()">✅ 각인 공병 등록</button>
+    </div>
+    <hr class="divider">
+    <div id="julyBaseEngList"><p style="color:var(--text3);font-size:13px;text-align:center;padding:10px 0">등록된 각인 공병이 없습니다</p></div>
+  </div>
+
+  <!-- 확정 완료 -->
+  <div class="card" style="border:1px solid var(--danger)">
+    <div class="sec-h" style="color:var(--danger)">③ 7월 1일 기준 확정</div>
+    <div class="alert alert-warn" style="margin-bottom:14px">
+      확정하면 이 탭은 목록에서 사라집니다 (데이터는 그대로 유지되며, 다시 필요하면 관리자에게 요청해 되돌릴 수 있습니다).
+      완제품 재고와 각인 공병 등록을 모두 마친 뒤에 눌러주세요.
+    </div>
+    <div class="flex-end">
+      <button class="btn btn-danger" onclick="applyJulyBaseConfirm()">🔒 7월 1일 기준 확정 완료 — 이 탭 숨기기</button>
     </div>
   </div>
 </div>
@@ -2940,6 +3024,7 @@ async function initApp() {
   refreshMixGasOptionLists();
   refreshRawGasSelOptions();
   renderCustomRawList();
+  refreshJulyBaseNavVisibility();
 
   // 실시간 리스너 시작
   window.dispatchEvent(new Event('gasImsReady'));
@@ -3493,6 +3578,7 @@ function nav(id) {
   document.getElementById('page-' + id).classList.add('active');
   event.target.classList.add('active');
   if (id === 'dash') renderDash();
+  if (id === 'julybase') { initJulyBasePage(); }
   if (id === 'base')     { renderBase(); renderClientList(); renderExpireSettings(); }
   if (id === 'prod') { initProdPage(); renderTodayProdLog(); }
   if (id === 'cart')     { initCartPage(); renderTodayCartLog(); }
@@ -11380,6 +11466,168 @@ function saveInvEditRaw(idx) {
   renderRawTiles();
   renderInvEdit();
   alert('✅ 원재료 재고 수정 완료');
+}
+
+// ══════ 7월 시작 재고 확정 (1회용 탭) ══════
+const JULY_BASE_APPLIED_KEY = 'gasims_july_base_applied_v1';
+function getJulyBaseApplied() {
+  try { return JSON.parse(localStorage.getItem(JULY_BASE_APPLIED_KEY) || 'false'); } catch(e) { return false; }
+}
+function refreshJulyBaseNavVisibility() {
+  const btn = document.getElementById('navJulyBase');
+  if (!btn) return;
+  btn.style.display = getJulyBaseApplied() ? 'none' : '';
+}
+
+function initJulyBasePage() {
+  refreshJulyBaseNavVisibility();
+  // 업체 드롭다운 (재고 + 거래처)
+  const invComps = [...new Set(inventory.map(r => r.company).filter(Boolean))];
+  const allComps = [...new Set([...clients, ...invComps])].sort();
+  const compOptsHtml = '<option value="">선택</option>' + allComps.map(c => `<option>${c}</option>`).join('');
+  const coFilter = document.getElementById('julyBaseCoFilter');
+  if (coFilter) coFilter.innerHTML = '<option value="">전체 보기</option>' + allComps.map(c => `<option>${c}</option>`).join('');
+  const engComp = document.getElementById('jbEngComp');
+  if (engComp) engComp.innerHTML = compOptsHtml;
+
+  // 각인 성분 체크박스 (기본 성분 + 커스텀 등록 원재료)
+  const compsWrap = document.getElementById('jbEngComps');
+  if (compsWrap) {
+    const symList = ['H2','He','N2','O2','Ar','CO2','CH4', ...customRawDefs.map(d => d.symbol)];
+    compsWrap.innerHTML = [...new Set(symList)].map(s => `
+      <label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer">
+        <input type="checkbox" class="jb-eng-comp-chk" value="${s}" style="width:15px;height:15px;accent-color:var(--accent2)">${s}
+      </label>`).join('');
+  }
+
+  renderJulyBaseSummary();
+  renderJulyBaseFinished();
+  renderJulyBaseEngList();
+}
+
+function renderJulyBaseSummary() {
+  const wrap = document.getElementById('julyBaseSummary');
+  if (!wrap) return;
+  const finished = inventory.filter(r => !isEngravingRow(r));
+  const engravings = inventory.filter(isEngravingRow);
+  const totFull  = finished.reduce((s,r) => s + (r.full||0), 0);
+  const totEmpty = finished.reduce((s,r) => s + (r.empty||0), 0);
+  const totEngEmpty = engravings.reduce((s,r) => s + (r.empty||0), 0);
+  const negCount = finished.filter(r => (r.empty||0) < 0).length;
+  wrap.innerHTML = `
+    <div class="tile"><div class="tile-label">완제품 품목 수</div><div class="tile-val blue">${finished.length}</div></div>
+    <div class="tile"><div class="tile-label">총 실병</div><div class="tile-val green">${totFull}</div></div>
+    <div class="tile"><div class="tile-label">총 공병</div><div class="tile-val ${negCount?'red':'blue'}">${totEmpty}${negCount?` (마이너스 ${negCount}건)`:''}</div></div>
+    <div class="tile"><div class="tile-label">등록된 각인 공병 종류 / 합계</div><div class="tile-val amber">${engravings.length}종 / ${totEngEmpty}개</div></div>
+  `;
+}
+
+function renderJulyBaseFinished() {
+  const wrap = document.getElementById('julyBaseFinishedBody');
+  if (!wrap) return;
+  const coFilter = document.getElementById('julyBaseCoFilter')?.value || '';
+  const rows = inventory
+    .filter(r => !isEngravingRow(r))
+    .filter(r => !coFilter || r.company === coFilter)
+    .slice()
+    .sort((a,b) => (a.company||'').localeCompare(b.company||'') || (a.gas||'').localeCompare(b.gas||''));
+
+  if (!rows.length) {
+    wrap.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text3);padding:20px">재고 항목이 없습니다</td></tr>';
+    return;
+  }
+  wrap.innerHTML = rows.map(r => `<tr>
+    <td style="font-size:12px">${r.gas}</td>
+    <td style="font-size:12px">${r.size}</td>
+    <td style="font-size:12px">${r.company}</td>
+    <td><input type="number" id="jb_full_${r.id}" value="${r.full||0}" style="width:80px;text-align:right"></td>
+    <td><input type="number" id="jb_empty_${r.id}" value="${r.empty||0}" style="width:80px;text-align:right;${(r.empty||0)<0?'color:var(--danger);font-weight:700':''}"></td>
+    <td><button class="btn btn-sm btn-success" onclick="saveJulyBaseFinishedRow('${r.id}')">저장</button></td>
+  </tr>`).join('');
+}
+
+function saveJulyBaseFinishedRow(id) {
+  const r = inventory.find(x => x.id === id);
+  if (!r) return;
+  const newFull  = parseInt(document.getElementById(`jb_full_${id}`).value) || 0;
+  const newEmpty = parseInt(document.getElementById(`jb_empty_${id}`).value) || 0;
+  r.full = newFull; r.empty = newEmpty;
+  save(STORE_KEY_INV, inventory);
+  renderJulyBaseSummary();
+  renderJulyBaseFinished();
+  renderDash();
+}
+
+function addJulyBaseEngraving() {
+  const company = document.getElementById('jbEngComp').value;
+  const size    = document.getElementById('jbEngSize').value;
+  const qty     = parseInt(document.getElementById('jbEngQty').value) || 0;
+  const comps   = [...document.querySelectorAll('.jb-eng-comp-chk:checked')].map(c => c.value);
+
+  if (!company) { alert('업체를 선택해주세요.'); return; }
+  if (!size)    { alert('실린더 규격을 선택해주세요.'); return; }
+  if (qty <= 0) { alert('수량을 1 이상 입력해주세요.'); return; }
+  if (comps.length < 2) { alert('각인 성분을 2개 이상 선택해주세요. (단일 성분은 각인 등록이 필요 없습니다)'); return; }
+
+  const gasName = `혼합 [${comps.join(' / ')}]`;
+  let inv = inventory.find(r => r.gas === gasName && r.size === size && r.company === company);
+  if (!inv) {
+    inv = { id: uid(), gas: gasName, size, company, dinoCode: '', full: 0, empty: 0, liter: null };
+    inventory.push(inv);
+  }
+  inv.empty = (inv.empty || 0) + qty;
+  save(STORE_KEY_INV, inventory);
+
+  document.getElementById('jbEngQty').value = 1;
+  document.querySelectorAll('.jb-eng-comp-chk').forEach(c => c.checked = false);
+
+  renderJulyBaseSummary();
+  renderJulyBaseEngList();
+  alert(`✅ "${gasName}" 각인 공병 ${qty}개 등록 완료 (${company} / ${size})`);
+}
+
+function renderJulyBaseEngList() {
+  const wrap = document.getElementById('julyBaseEngList');
+  if (!wrap) return;
+  const rows = inventory.filter(isEngravingRow);
+  if (!rows.length) {
+    wrap.innerHTML = '<p style="color:var(--text3);font-size:13px;text-align:center;padding:10px 0">등록된 각인 공병이 없습니다</p>';
+    return;
+  }
+  wrap.innerHTML = rows.map(r => `
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid var(--border);font-size:12px">
+      <strong>${r.company}</strong>
+      <span style="color:var(--text3)">${r.size}</span>
+      <span class="tag tag-mix">${r.gas}</span>
+      <span style="color:var(--accent);font-weight:700">${r.empty||0}개</span>
+      <div class="spacer"></div>
+      <button class="btn btn-sm btn-danger" onclick="deleteJulyBaseEngraving('${r.id}')">삭제</button>
+    </div>`).join('');
+}
+
+function deleteJulyBaseEngraving(id) {
+  if (!confirm('이 각인 공병 등록을 삭제하시겠습니까?')) return;
+  inventory = inventory.filter(r => r.id !== id);
+  save(STORE_KEY_INV, inventory);
+  renderJulyBaseSummary();
+  renderJulyBaseEngList();
+}
+
+function applyJulyBaseConfirm() {
+  const finishedCount = inventory.filter(r => !isEngravingRow(r)).length;
+  const engCount = inventory.filter(isEngravingRow).length;
+  if (!confirm(
+    `현재 완제품 ${finishedCount}개 품목, 각인 공병 ${engCount}종이 등록되어 있습니다.\n` +
+    `확정하면 이 탭은 목록에서 사라집니다.\n\n계속하시겠습니까?`
+  )) return;
+
+  const record = { appliedAt: now(), by: currentUser?.name || '', finishedCount, engCount };
+  localStorage.setItem(JULY_BASE_APPLIED_KEY, JSON.stringify(record));
+  save(JULY_BASE_APPLIED_KEY, record);
+
+  refreshJulyBaseNavVisibility();
+  nav('dash');
+  alert('✅ 7월 1일 기준 재고 확정 완료!\n이제부터 평소처럼 생산/출고/공병입고 화면을 사용하시면 됩니다.');
 }
 
 function renderUserList() {
