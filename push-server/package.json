@@ -1,0 +1,17 @@
+{
+  "name": "gasims-push-server",
+  "description": "GAS-IMS 재고 부족 웹푸시 발송용 Cloud Functions",
+  "private": true,
+  "main": "index.js",
+  "engines": {
+    "node": "20"
+  },
+  "scripts": {
+    "deploy": "firebase deploy --only functions",
+    "logs": "firebase functions:log"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.7.0",
+    "firebase-functions": "^6.1.0"
+  }
+}
