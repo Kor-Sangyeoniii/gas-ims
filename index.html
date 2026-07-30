@@ -1845,9 +1845,24 @@ console.log('✅ Firebase 초기화 완료');
         <span>📋 출고 LOT · 실린더 선택 <span style="font-weight:400;color:var(--text3);font-size:11px">(여러 LOT 선택 가능)</span></span>
         <span id="txnLotCount" style="font-size:11px;color:var(--text3);font-family:var(--mono)"></span>
       </div>
+
+      <!-- LOT 번호 직접 조회 — 업체·규격 상관없이 LOT로 찾아 출고 -->
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:10px">
+        <span style="font-size:11px;font-weight:700;color:var(--accent2);white-space:nowrap">🔍 LOT 번호로 조회</span>
+        <input type="text" id="txnLotSearch" placeholder="예: N2-HP 260715 또는 260715"
+               style="flex:1;min-width:180px;font-family:var(--mono);font-size:12px"
+               onkeydown="if(event.key==='Enter'){event.preventDefault();populateTxnLots();}"
+               oninput="populateTxnLots()">
+        <label style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text2);cursor:pointer;white-space:nowrap">
+          <input type="checkbox" id="txnIgnoreFilter" onchange="populateTxnLots()" style="width:13px;height:13px;accent-color:var(--warn)">
+          가스·규격·업체 무시
+        </label>
+        <button class="btn btn-sm" style="background:var(--bg4);border:1px solid var(--border2);color:var(--text2);font-size:11px;padding:3px 9px"
+                onclick="document.getElementById('txnLotSearch').value='';document.getElementById('txnIgnoreFilter').checked=false;populateTxnLots()">초기화</button>
+      </div>
       <div style="font-size:11px;color:var(--text3);margin-bottom:10px">
         예: 15개 출고 → 12개짜리 LOT 전체 선택 + 3개짜리 LOT에서 3개 선택<br>
-        출고 후 이력에서 <strong>LOT별로 각각 성적서 발행</strong>됩니다.
+        <strong style="color:var(--warn)">해당 업체 병이 아니어도 출고 가능</strong> — LOT 번호로 조회하거나 "가스·규격·업체 무시"를 켜면 전체 LOT에서 선택할 수 있습니다.
       </div>
       <div id="txnLotList" style="background:var(--bg2);border-radius:6px;padding:8px;max-height:320px;overflow-y:auto">
         <div style="color:var(--text3);font-size:12px;padding:8px;text-align:center">가스/규격을 먼저 선택하세요</div>
@@ -5566,13 +5581,19 @@ function populateTxnLots() {
   });
 
   // 4) 필터링
+  // LOT 번호 검색어가 있거나 "필터 무시"가 켜져 있으면 가스·규격 조건을 풀어준다.
+  // (한 LOT에 업체·규격이 섞여 있을 수 있고, 해당 업체 병이 아니어도 출고될 수 있으므로)
+  const lotQuery    = (document.getElementById('txnLotSearch')?.value || '').trim().toUpperCase();
+  const ignoreFilter = !!document.getElementById('txnIgnoreFilter')?.checked || !!lotQuery;
+
   let available = Object.values(produceLots).filter(lot => {
-    if (!gas || lot.gas !== gas) return false;
+    if (lotQuery && !String(lot.lotNo).toUpperCase().includes(lotQuery)) return false;
+    if (!ignoreFilter && (!gas || lot.gas !== gas)) return false;
     const shipped = shippedCylsByLot[lot.lotNo] || new Set();
     // 규격 필터: 실린더 단위로 적용 — 혼합 LOT에서 선택 규격의 실린더만 표시
     lot._remainingCyls = lot.containers.filter(no => {
       if (shipped.has(no)) return false;
-      if (size) {
+      if (!ignoreFilter && size) {
         const cylSize = (lot.cylSizes && lot.cylSizes[no]) || lot.size;
         if (cylSize !== size) return false;
       }
@@ -5584,10 +5605,10 @@ function populateTxnLots() {
   available.sort((a,b) => (b.analysisDate||b.date||'').localeCompare(a.analysisDate||a.date||''));
 
   const countEl = document.getElementById('txnLotCount');
-  if (countEl) countEl.textContent = `출고 가능 LOT ${available.length}개`;
+  if (countEl) countEl.textContent = `출고 가능 LOT ${available.length}개${ignoreFilter ? ' · 전체 조회' : ''}`;
 
   if (!available.length) {
-    listEl.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:12px;text-align:center">출고 가능한 LOT가 없습니다<br><span style="font-size:11px">가스/규격을 선택하면 LOT 목록이 표시됩니다</span></div>';
+    listEl.innerHTML = `<div style="color:var(--text3);font-size:12px;padding:12px;text-align:center">출고 가능한 LOT가 없습니다<br><span style="font-size:11px">${lotQuery ? 'LOT 번호를 다시 확인해주세요' : '가스/규격을 선택하거나 LOT 번호로 조회하세요'}</span></div>`;
     updateTxnTotalSelected();
     return;
   }
@@ -5598,6 +5619,7 @@ function populateTxnLots() {
     const mark = lot.hasAnalysis ? '✓ 분석완료' : '○ 분석전';
     const markColor = lot.hasAnalysis ? 'var(--accent)' : 'var(--warn)';
     const cyls = lot._remainingCyls;
+    lot._sizeMixed = new Set(cyls.map(no => (lot.cylSizes && lot.cylSizes[no]) || lot.size)).size > 1;
     return `
       <div class="txn-lot-group" data-lotno="${lot.lotNo}" style="background:var(--bg3);border-radius:8px;padding:10px;margin-bottom:8px;border:1px solid var(--border)">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;gap:8px">
@@ -5614,13 +5636,19 @@ function populateTxnLots() {
           </div>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px">
-          ${cyls.map((no, idx) => `
+          ${cyls.map((no, idx) => {
+            // LOT 안에 규격이 섞여 있으면 실린더마다 규격을 표시해 구분
+            const cs = (lot.cylSizes && lot.cylSizes[no]) || lot.size || '';
+            const mixed = lot._sizeMixed;
+            return `
             <label style="display:flex;align-items:center;gap:6px;padding:5px 8px;background:var(--bg2);border-radius:6px;cursor:pointer;font-size:12px">
-              <input type="checkbox" class="txn-cyl-chk" data-lotno="${lot.lotNo}" value="${no}"
+              <input type="checkbox" class="txn-cyl-chk" data-lotno="${lot.lotNo}" value="${no}" data-size="${cs}"
                 style="width:14px;height:14px;accent-color:var(--accent2)" onchange="updateTxnTotalSelected()">
               <span style="color:var(--text3);font-size:10px;font-family:var(--mono)">${idx+1}</span>
               <span style="font-family:var(--mono)">${no}</span>
-            </label>`).join('')}
+              ${mixed ? `<span style="margin-left:auto;font-size:9px;font-family:var(--mono);color:var(--warn);background:rgba(210,153,34,.15);padding:1px 5px;border-radius:3px">${cs}</span>` : ''}
+            </label>`;
+          }).join('')}
         </div>
       </div>`;
   }).join('');
@@ -5678,7 +5706,15 @@ function syncTxnFilters() {
 
   const matches2 = inventory.filter(r => (!gas || r.gas === gas) && (!size || r.size === size));
   const cos = [...new Set(matches2.map(r => r.company))];
-  document.getElementById('txnComp').innerHTML = '<option value="">선택</option>' + cos.map(c=>`<option>${c}</option>`).join('');
+  // 해당 조합 재고가 없는 업체로도 출고할 수 있어야 하므로 전체 거래처를 함께 제공
+  const allComps = [...new Set([...(clients || []), ...inventory.map(r => r.company)])].filter(Boolean).sort();
+  const others = allComps.filter(c => !cos.includes(c));
+  const compEl = document.getElementById('txnComp');
+  const prev = compEl.value;
+  compEl.innerHTML = '<option value="">선택</option>' +
+    cos.map(c=>`<option${c===prev?' selected':''}>${c}</option>`).join('') +
+    (others.length ? `<optgroup label="── 재고 없는 업체 (출고 시 항목 생성) ──">` +
+      others.map(c=>`<option${c===prev?' selected':''}>${c}</option>`).join('') + '</optgroup>' : '');
 
   // 출고 모드에서는 LOT 목록도 업데이트
   if (curTxnType === 'ship') populateTxnLots();
@@ -5695,8 +5731,15 @@ function saveTxn() {
 
   if (!gas || !size || !comp) { alert('가스, 규격, 업체를 모두 선택해주세요.'); return; }
 
-  const inv = inventory.find(r => r.gas === gas && r.size === size && r.company === comp);
-  if (!inv) { alert('해당 항목을 찾을 수 없습니다.'); return; }
+  let inv = inventory.find(r => r.gas === gas && r.size === size && r.company === comp);
+  if (!inv) {
+    // 해당 업체 병이 아니어도 출고될 수 있으므로, 재고 항목이 없으면 새로 만들어 진행한다.
+    // (LOT에 여러 업체 병이 섞여 있는 경우 대응)
+    if (!confirm(`재고 항목이 없습니다.\n\n  ${gas} · ${size} · ${comp}\n\n이 조합으로 새 재고 항목을 만들고 출고를 진행하시겠습니까?`)) return;
+    inv = { id: uid(), gas, size, company: comp, dinoCode: '', full: 0, empty: 0, liter: null };
+    inventory.push(inv);
+    save(STORE_KEY_INV, inventory);
+  }
 
   const typeLabel = { ship:'출고', adjust:'조정' };
 
