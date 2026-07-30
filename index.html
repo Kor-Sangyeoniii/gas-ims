@@ -276,6 +276,8 @@ function _subscribe() {
   let okCount = 0;
   FS_KEYS.forEach(key => {
     const unsub = onSnapshot(doc(db, FS_COL, key), snap => {
+      window._listenerHealthy = true;            // 실시간 리스너 정상 작동 확인
+      window._readCount = (window._readCount || 0) + 1;
       if (!snap.exists()) return;
       const data = snap.data();
       const val  = data.data;
@@ -290,6 +292,7 @@ function _subscribe() {
       localStorage.setItem(key, JSON.stringify(val));
       window.onFsUpdate && window.onFsUpdate(key, val);
     }, err => {
+      window._listenerHealthy = false;           // 리스너 차단 → REST 폴백으로 전환
       console.warn('Firebase 리스너 에러:', key, err.code, '— 3초 후 재구독');
       setTimeout(_subscribe, 3000);
     });
@@ -301,30 +304,69 @@ function _subscribe() {
 window.addEventListener('gasImsReady', () => {
   _subscribe();
 
-  // 10초마다 REST로 강제 동기화 (SDK 차단 환경에서도 작동)
+  // ══════════════════════════════════════════════════════════
+  //  적응형 동기화 (Firestore 읽기 할당량 최적화)
+  //  ① 실시간 리스너가 정상이면 → REST 폴링을 5분 안전망으로만 사용
+  //  ② 리스너가 차단된 환경이면 → 60초 폴백 폴링으로 자동 전환
+  //  ③ 탭이 보이지 않으면 폴링 중단, 다시 보면 즉시 1회 동기화
+  //  → 기존 10초 고정 폴링 대비 읽기 횟수 약 95% 절감
+  // ══════════════════════════════════════════════════════════
+  const POLL_TICK_MS      = 10000;  // 판단 주기
+  const POLL_HEALTHY_SEC  = 300;    // 리스너 정상 시 안전망 주기 (5분)
+  const POLL_FALLBACK_SEC = 60;     // 리스너 차단 시 폴백 주기 (60초)
+
   const _restTimestamps = {};
-  setInterval(async () => {
-    for (const key of FS_KEYS) {
-      try {
-        const res = await fetch(`${FS_REST_BASE}/${key}?key=${FS_API_KEY}`);
-        if (!res.ok) continue;
-        const docJson = await res.json();
-        if (!docJson.fields || !docJson.fields.data) continue;
-        const updatedAt = docJson.fields.updatedAt ? parseInt(docJson.fields.updatedAt.integerValue) : 0;
-        const source    = docJson.fields.source ? docJson.fields.source.stringValue : '';
-        if (source === _clientId) continue;
-        if (_restTimestamps[key] === updatedAt) continue;
-        const val = _fromRestValue(docJson.fields.data);
-        const local = localStorage.getItem(key);
-        _restTimestamps[key] = updatedAt;
-        if (JSON.stringify(val) !== local) {
-          localStorage.setItem(key, JSON.stringify(val));
-          window.onFsUpdate && window.onFsUpdate(key, val);
-          window._lastSync = new Date().toLocaleTimeString();
-        }
-      } catch(e) {}
-    }
-  }, 10000);
+  let _restBusy = false;
+
+  async function _restSyncAll(reason) {
+    if (_restBusy) return;
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+    _restBusy = true;
+    try {
+      for (const key of FS_KEYS) {
+        try {
+          const res = await fetch(`${FS_REST_BASE}/${key}?key=${FS_API_KEY}`);
+          window._readCount = (window._readCount || 0) + 1;
+          if (!res.ok) continue;
+          const docJson = await res.json();
+          if (!docJson.fields || !docJson.fields.data) continue;
+          const updatedAt = docJson.fields.updatedAt ? parseInt(docJson.fields.updatedAt.integerValue) : 0;
+          const source    = docJson.fields.source ? docJson.fields.source.stringValue : '';
+          if (source === _clientId) continue;
+          if (_restTimestamps[key] === updatedAt) continue;
+          const val = _fromRestValue(docJson.fields.data);
+          const local = localStorage.getItem(key);
+          _restTimestamps[key] = updatedAt;
+          if (JSON.stringify(val) !== local) {
+            localStorage.setItem(key, JSON.stringify(val));
+            window.onFsUpdate && window.onFsUpdate(key, val);
+            window._lastSync = new Date().toLocaleTimeString();
+          }
+        } catch(e) {}
+      }
+    } finally { _restBusy = false; }
+  }
+  window._restSyncAll = _restSyncAll;
+
+  // 시작 시 1회 동기화 (리스너 초기 스냅샷과 별개 안전망)
+  _restSyncAll('init');
+
+  let _elapsed = 0;
+  setInterval(() => {
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return; // 탭 비활성 → 카운트 중단
+    _elapsed += POLL_TICK_MS / 1000;
+    const target = window._listenerHealthy ? POLL_HEALTHY_SEC : POLL_FALLBACK_SEC;
+    if (_elapsed >= target) { _elapsed = 0; _restSyncAll('poll'); }
+  }, POLL_TICK_MS);
+
+  // 탭으로 돌아오면 즉시 최신화
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') { _elapsed = 0; _restSyncAll('visible'); }
+    });
+  }
+  window.addEventListener('focus', () => { _restSyncAll('focus'); });
+  window.addEventListener('online', () => { _restSyncAll('online'); });
 });
 
 // 연결 상태 표시
@@ -929,11 +971,77 @@ console.log('✅ Firebase 초기화 완료');
       <p style="color:var(--text3);font-size:13px;text-align:center;padding:20px 0">오늘 입력된 생산 내역이 없습니다</p>
     </div>
   </div>
+
+  <!-- ── 생산 이력 조회 ── -->
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:10px">
+      <div class="sec-h" style="margin:0">🏭 생산 이력 조회</div>
+    </div>
+    <div class="flex-gap" style="gap:8px;flex-wrap:wrap;align-items:end;margin-bottom:12px">
+      <div class="field" style="margin-bottom:0">
+        <label>시작일</label>
+        <input type="date" id="prodHistFrom" style="width:150px">
+      </div>
+      <div class="field" style="margin-bottom:0">
+        <label>종료일</label>
+        <input type="date" id="prodHistTo" style="width:150px">
+      </div>
+      <div class="field" style="margin-bottom:0">
+        <label>가스 품목</label>
+        <select id="prodHistGas" style="width:160px">
+          <option value="">전체</option>
+        </select>
+      </div>
+      <div class="field" style="margin-bottom:0">
+        <label>업체</label>
+        <select id="prodHistComp" style="width:150px">
+          <option value="">전체</option>
+        </select>
+      </div>
+      <div style="display:flex;gap:6px">
+        <button class="btn btn-sm btn-primary" onclick="renderProdHist()">🔍 조회</button>
+        <button class="btn btn-sm" style="background:var(--bg4);border:1px solid var(--border2);color:var(--text2)" onclick="prodHistQuick(7)">최근 7일</button>
+        <button class="btn btn-sm" style="background:var(--bg4);border:1px solid var(--border2);color:var(--text2)" onclick="prodHistQuick(30)">최근 30일</button>
+      </div>
+    </div>
+    <div id="prodHistCount" style="font-size:12px;color:var(--text3);margin-bottom:8px;font-family:var(--mono)"></div>
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:100px">생산일</th>
+            <th style="width:150px">LOT NO.</th>
+            <th>가스 품목</th>
+            <th style="width:110px">규격</th>
+            <th>업체</th>
+            <th style="width:60px" class="num">수량</th>
+            <th style="width:80px">분석</th>
+            <th style="width:80px">수정</th>
+          </tr>
+        </thead>
+        <tbody id="prodHistBody">
+          <tr><td colspan="8" style="text-align:center;color:var(--text3);padding:20px">🔍 조회 버튼을 눌러 조회하세요</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
 </div>
 
 <!-- ══════════════ CART ══════════════ -->
 <div class="page" id="page-cart">
   <div class="alert alert-info">카트리지 번호별 현재 가스량을 관리하고, 출고·반납 시 온도·압력으로 정산합니다. He 전용 카트리지입니다.</div>
+
+  <!-- 깨진 데이터 경고 배너 (문제가 있을 때만 표시) -->
+  <div id="cartFixBanner" style="display:none;background:rgba(248,81,73,.1);border:1px solid var(--danger);border-radius:10px;padding:14px 18px;margin-bottom:14px">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+      <div style="font-size:13px;color:var(--text2);line-height:1.6">
+        <strong style="color:var(--danger)">⚠️ 카트리지 번호가 깨진 항목이 있습니다</strong>
+        <span id="cartFixCount" style="color:var(--danger);font-weight:700"></span><br>
+        <span style="font-size:12px;color:var(--text3)">엑셀 가져오기 오류로 번호가 잘려 들어간 항목입니다. 번호를 고치거나 삭제할 수 있습니다.</span>
+      </div>
+      <button class="btn btn-danger" onclick="openCartFix()" style="white-space:nowrap">🔧 정리하기</button>
+    </div>
+  </div>
 
   <!-- 카트리지 현재고 -->
   <div class="card">
@@ -1132,6 +1240,45 @@ console.log('✅ Firebase 초기화 완료');
   <div class="card">
     <div class="sec-h">오늘의 카트리지 내역</div>
     <div id="todayCartLog"><p style="color:var(--text3);font-size:13px;text-align:center;padding:20px 0">오늘 입력된 내역이 없습니다</p></div>
+  </div>
+
+  <!-- ── 카트리지 이력 조회 ── -->
+  <div class="card">
+    <div class="sec-h">🔧 카트리지 이력 조회</div>
+    <div class="flex-gap" style="gap:8px;flex-wrap:wrap;align-items:end;margin-bottom:12px">
+      <div class="field" style="margin-bottom:0">
+        <label>시작일</label>
+        <input type="date" id="cartHistFrom" style="width:150px">
+      </div>
+      <div class="field" style="margin-bottom:0">
+        <label>종료일</label>
+        <input type="date" id="cartHistTo" style="width:150px">
+      </div>
+      <div class="field" style="margin-bottom:0">
+        <label>유형</label>
+        <select id="cartHistType" style="width:140px">
+          <option value="">전체</option>
+          <option value="fill">충전</option>
+          <option value="out">출고</option>
+          <option value="ret">반납</option>
+          <option value="raw_in">원재료입고</option>
+          <option value="inspect">검사완료</option>
+        </select>
+      </div>
+      <div class="field" style="margin-bottom:0">
+        <label>카트리지 번호</label>
+        <select id="cartHistNo" style="width:150px"><option value="">전체</option></select>
+      </div>
+      <div style="display:flex;gap:6px">
+        <button class="btn btn-sm btn-primary" onclick="renderCartHist()">🔍 조회</button>
+        <button class="btn btn-sm" style="background:var(--bg4);border:1px solid var(--border2);color:var(--text2)" onclick="cartHistQuick(7)">최근 7일</button>
+        <button class="btn btn-sm" style="background:var(--bg4);border:1px solid var(--border2);color:var(--text2)" onclick="cartHistQuick(30)">최근 30일</button>
+      </div>
+    </div>
+    <div id="cartHistCount" style="font-size:12px;color:var(--text3);margin-bottom:8px;font-family:var(--mono)"></div>
+    <div id="cartHistBody">
+      <p style="color:var(--text3);font-size:13px;text-align:center;padding:20px 0">🔍 조회 버튼을 눌러 조회하세요</p>
+    </div>
   </div>
 </div>
 
@@ -1333,6 +1480,52 @@ console.log('✅ Firebase 초기화 완료');
   </div>
 </div>
 
+<!-- 카트리지 깨진 데이터 정리 모달 -->
+<div id="cartFixModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:10002;align-items:flex-start;justify-content:center;padding:20px;overflow-y:auto">
+  <div style="background:var(--bg2);border-radius:12px;padding:24px;width:820px;max-width:96vw;margin:auto">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <div style="font-size:16px;font-weight:700">🔧 카트리지 번호 정리</div>
+      <button onclick="closeCartFix()" style="background:none;border:none;color:var(--text3);font-size:22px;cursor:pointer">×</button>
+    </div>
+
+    <div class="alert alert-warn" style="font-size:12px;line-height:1.6;margin-bottom:14px">
+      엑셀 가져오기 과정에서 카트리지 번호가 조각나서 저장된 항목입니다. (예: <code>90다3602</code> → <code>90</code> + <code>다3602</code>)<br>
+      <strong>번호를 직접 고치거나</strong>, 잘못 들어온 항목은 <strong>선택해서 삭제</strong>한 뒤 엑셀을 다시 가져오시면 됩니다.<br>
+      <strong style="color:var(--danger)">※ 작업 전 관리자 화면에서 데이터 백업을 먼저 받으세요.</strong>
+    </div>
+
+    <div id="cartFixLogWarn" style="display:none;background:rgba(210,153,34,.12);border:1px solid var(--warn);border-radius:8px;padding:10px 14px;font-size:12px;color:var(--warn);margin-bottom:12px"></div>
+
+    <div class="tbl-wrap" style="max-height:380px">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:40px"><input type="checkbox" id="cartFixAll" onchange="toggleCartFixAll(this)" style="width:15px;height:15px;accent-color:var(--danger)"></th>
+            <th style="width:150px">현재 번호</th>
+            <th style="width:170px">고칠 번호</th>
+            <th style="text-align:right">내용적(L)</th>
+            <th style="text-align:right">실린더</th>
+            <th>충전기한</th>
+            <th>이력</th>
+          </tr>
+        </thead>
+        <tbody id="cartFixBody"></tbody>
+      </table>
+    </div>
+
+    <div style="font-size:11px;color:var(--text3);margin-top:8px">
+      💡 <strong>고칠 번호</strong> 칸에 올바른 번호(예: 90다3602)를 입력하고 "번호 저장"을 누르면 해당 항목만 수정됩니다.
+      체크한 항목은 "선택 삭제"로 제거됩니다.
+    </div>
+
+    <div class="flex-end" style="gap:8px;margin-top:16px">
+      <button class="btn" style="background:var(--bg3);border:1px solid var(--border);color:var(--text2)" onclick="closeCartFix()">닫기</button>
+      <button class="btn btn-primary" onclick="saveCartFixNumbers()">💾 번호 저장</button>
+      <button class="btn btn-danger" onclick="deleteCartFixSelected()">🗑 선택 삭제</button>
+    </div>
+  </div>
+</div>
+
 <!-- 카트리지 검사 완료 모달 -->
 <div id="inspectModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;align-items:center;justify-content:center">
   <div style="background:var(--bg2);border-radius:12px;padding:24px;width:380px;max-width:95vw">
@@ -1457,6 +1650,43 @@ console.log('✅ Firebase 초기화 완료');
       <p style="color:var(--text3);font-size:13px;text-align:center;padding:20px 0">오늘 입력된 입고 내역이 없습니다</p>
     </div>
   </div>
+
+  <!-- ── 공병 입고 이력 조회 ── -->
+  <div class="card">
+    <div class="sec-h">📥 공병 입고 이력 조회</div>
+    <div class="flex-gap" style="gap:8px;flex-wrap:wrap;align-items:end;margin-bottom:12px">
+      <div class="field" style="margin-bottom:0">
+        <label>시작일</label>
+        <input type="date" id="incHistFrom" style="width:150px">
+      </div>
+      <div class="field" style="margin-bottom:0">
+        <label>종료일</label>
+        <input type="date" id="incHistTo" style="width:150px">
+      </div>
+      <div class="field" style="margin-bottom:0">
+        <label>가스 품목</label>
+        <select id="incHistGas" style="width:160px"><option value="">전체</option></select>
+      </div>
+      <div class="field" style="margin-bottom:0">
+        <label>업체</label>
+        <select id="incHistComp" style="width:150px"><option value="">전체</option></select>
+      </div>
+      <div style="display:flex;gap:6px">
+        <button class="btn btn-sm btn-primary" onclick="renderIncHist()">🔍 조회</button>
+        <button class="btn btn-sm" style="background:var(--bg4);border:1px solid var(--border2);color:var(--text2)" onclick="incHistQuick(7)">최근 7일</button>
+        <button class="btn btn-sm" style="background:var(--bg4);border:1px solid var(--border2);color:var(--text2)" onclick="incHistQuick(30)">최근 30일</button>
+      </div>
+    </div>
+    <div id="incHistCount" style="font-size:12px;color:var(--text3);margin-bottom:8px;font-family:var(--mono)"></div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th style="width:100px">입고일</th><th>가스 품목</th><th style="width:110px">규격</th><th>업체</th><th style="width:80px" class="num">공병</th><th>비고</th></tr></thead>
+        <tbody id="incHistBody">
+          <tr><td colspan="6" style="text-align:center;color:var(--text3);padding:20px">🔍 조회 버튼을 눌러 조회하세요</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
 </div>
 
 <!-- ══════════════ ORDER ══════════════ -->
@@ -1522,20 +1752,43 @@ console.log('✅ Firebase 초기화 완료');
 
   <!-- 발주 이력 -->
   <div class="card" style="margin-top:16px">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
-      <div class="sec-h" style="margin-bottom:0">발주 이력</div>
-      <div style="display:flex;gap:8px">
-        <select id="ordHistFilter" onchange="renderOrderHist()" style="font-size:12px;width:120px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+      <div class="sec-h" style="margin-bottom:0">📋 발주 이력 조회</div>
+    </div>
+    <div class="flex-gap" style="gap:8px;flex-wrap:wrap;align-items:end;margin-bottom:12px">
+      <div class="field" style="margin-bottom:0">
+        <label>시작일</label>
+        <input type="date" id="ordHistFrom" style="width:150px">
+      </div>
+      <div class="field" style="margin-bottom:0">
+        <label>종료일</label>
+        <input type="date" id="ordHistTo" style="width:150px">
+      </div>
+      <div class="field" style="margin-bottom:0">
+        <label>발주처</label>
+        <select id="ordHistComp" style="width:150px">
+          <option value="">전체</option>
+        </select>
+      </div>
+      <div class="field" style="margin-bottom:0">
+        <label>상태</label>
+        <select id="ordHistFilter" style="width:120px">
           <option value="">전체 상태</option>
-          <option value="pending">대기</option>
+          <option value="pending">납품불가</option>
           <option value="partial">일부가능</option>
           <option value="ready">납품가능</option>
           <option value="done">완료</option>
         </select>
       </div>
+      <div style="display:flex;gap:6px">
+        <button class="btn btn-sm btn-primary" onclick="renderOrderHist()">🔍 조회</button>
+        <button class="btn btn-sm" style="background:var(--bg4);border:1px solid var(--border2);color:var(--text2)" onclick="ordHistQuick(30)">최근 30일</button>
+        <button class="btn btn-sm" style="background:var(--bg4);border:1px solid var(--border2);color:var(--text2)" onclick="ordHistQuick(0)">전체</button>
+      </div>
     </div>
+    <div id="ordHistCount" style="font-size:12px;color:var(--text3);margin-bottom:8px;font-family:var(--mono)"></div>
     <div id="ordHistBody">
-      <p style="color:var(--text3);font-size:13px;text-align:center;padding:20px 0">저장된 발주가 없습니다</p>
+      <p style="color:var(--text3);font-size:13px;text-align:center;padding:20px 0">🔍 조회 버튼을 눌러 조회하세요</p>
     </div>
   </div>
 </div>
@@ -1616,11 +1869,61 @@ console.log('✅ Firebase 초기화 완료');
       <p style="color:var(--text3);font-size:13px;text-align:center;padding:20px 0">오늘 입력된 내역이 없습니다</p>
     </div>
   </div>
+
+  <!-- ── 출고 이력 조회 (성적서 발행 연동) ── -->
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:10px">
+      <div class="sec-h" style="margin:0">📤 출고 이력 조회 <span style="font-weight:400;font-size:12px;color:var(--text3)">— 성적서 발행 연동</span></div>
+      <button class="btn btn-sm btn-success" onclick="openBatchCertFromTxn()" style="white-space:nowrap">📦 업체·날짜 일괄 발행</button>
+    </div>
+    <div class="flex-gap" style="gap:8px;flex-wrap:wrap;align-items:end;margin-bottom:12px">
+      <div class="field" style="margin-bottom:0">
+        <label>시작일</label>
+        <input type="date" id="txnHistFrom" style="width:150px">
+      </div>
+      <div class="field" style="margin-bottom:0">
+        <label>종료일</label>
+        <input type="date" id="txnHistTo" style="width:150px">
+      </div>
+      <div class="field" style="margin-bottom:0">
+        <label>업체</label>
+        <select id="txnHistComp" style="width:160px">
+          <option value="">전체</option>
+        </select>
+      </div>
+      <div style="display:flex;gap:6px">
+        <button class="btn btn-sm btn-primary" onclick="renderTxnShipHist()">🔍 조회</button>
+        <button class="btn btn-sm" style="background:var(--bg4);border:1px solid var(--border2);color:var(--text2)" onclick="txnHistQuick(7)">최근 7일</button>
+        <button class="btn btn-sm" style="background:var(--bg4);border:1px solid var(--border2);color:var(--text2)" onclick="txnHistQuick(30)">최근 30일</button>
+      </div>
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:100px">출고일</th>
+            <th>가스 품목</th>
+            <th style="width:110px">규격</th>
+            <th>업체</th>
+            <th style="width:70px" class="num">수량</th>
+            <th>LOT / 실린더</th>
+            <th style="width:90px">성적서</th>
+          </tr>
+        </thead>
+        <tbody id="txnShipHistBody">
+          <tr><td colspan="7" style="text-align:center;color:var(--text3);padding:20px">🔍 조회 버튼을 눌러 조회하세요</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
 </div>
 
 <!-- ══════════════ ANALYSIS ══════════════ -->
 <div class="page" id="page-analysis">
-  <div class="alert alert-info">생산된 LOT의 분석치를 입력하고 성적서를 발행합니다.</div>
+  <div class="alert alert-info" style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
+    <span>생산된 LOT의 분석치를 입력하고 성적서를 발행합니다.</span>
+    <button class="btn btn-sm btn-success" onclick="openBatchCert()" style="white-space:nowrap">📦 출고 기준 성적서 일괄 발행</button>
+  </div>
 
   <!-- LOT 선택 -->
   <div class="card">
@@ -1645,7 +1948,7 @@ console.log('✅ Firebase 초기화 완료');
         </div>
       </div>
       <div style="margin-top:18px;display:flex;gap:6px">
-        <button class="btn btn-primary" onclick="loadAnLots()">조회</button>
+        <button class="btn btn-primary" onclick="loadAnLots()">🔍 조회</button>
         <button id="anOnlyUnset" class="btn btn-sm"
           style="background:rgba(210,153,34,.2);border:1px solid var(--warn);color:var(--warn);font-size:12px"
           onclick="toggleAnOnlyUnset()">📋 전체 보기</button>
@@ -1665,7 +1968,7 @@ console.log('✅ Firebase 초기화 완료');
             <th>액션</th>
           </tr>
         </thead>
-        <tbody id="anLotBody"></tbody>
+        <tbody id="anLotBody"><tr><td colspan="8" style="text-align:center;color:var(--text3);padding:20px">🔍 조회 버튼을 눌러 조회하세요</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -1796,29 +2099,30 @@ console.log('✅ Firebase 초기화 완료');
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;align-items:end">
         <div class="field" style="margin:0">
           <label style="font-size:10px">🔍 LOT/메모</label>
-          <input type="text" id="anFilterText" placeholder="LOT 번호, 메모..." style="width:100%" oninput="renderAnHist()">
+          <input type="text" id="anFilterText" placeholder="LOT 번호, 메모..." style="width:100%" onkeydown="if(event.key==='Enter') renderAnHist()">
         </div>
         <div class="field" style="margin:0">
           <label style="font-size:10px">🏢 업체</label>
-          <select id="anFilterComp" style="width:100%" onchange="renderAnHist()">
+          <select id="anFilterComp" style="width:100%">
             <option value="">전체</option>
           </select>
         </div>
         <div class="field" style="margin:0">
           <label style="font-size:10px">⚗️ 가스</label>
-          <select id="anFilterGas" style="width:100%" onchange="renderAnHist()">
+          <select id="anFilterGas" style="width:100%">
             <option value="">전체</option>
           </select>
         </div>
         <div class="field" style="margin:0">
           <label style="font-size:10px">📅 분석일 (시작)</label>
-          <input type="date" id="anFilterFrom" style="width:100%" onchange="renderAnHist()">
+          <input type="date" id="anFilterFrom" style="width:100%">
         </div>
         <div class="field" style="margin:0">
           <label style="font-size:10px">📅 분석일 (종료)</label>
-          <input type="date" id="anFilterTo" style="width:100%" onchange="renderAnHist()">
+          <input type="date" id="anFilterTo" style="width:100%">
         </div>
         <div style="display:flex;gap:6px">
+          <button class="btn btn-sm btn-primary" style="flex:1.3" onclick="renderAnHist()">🔍 조회</button>
           <button class="btn btn-sm" style="background:var(--bg4);border:1px solid var(--border2);color:var(--text2);flex:1" onclick="setAnFilterPreset('today')">오늘</button>
           <button class="btn btn-sm" style="background:var(--bg4);border:1px solid var(--border2);color:var(--text2);flex:1" onclick="setAnFilterPreset('week')">7일</button>
           <button class="btn btn-sm" style="background:var(--bg4);border:1px solid var(--border2);color:var(--text2);flex:1" onclick="setAnFilterPreset('month')">30일</button>
@@ -1828,7 +2132,7 @@ console.log('✅ Firebase 초기화 완료');
     </div>
 
     <div id="anHistBody">
-      <p style="color:var(--text3);font-size:13px;text-align:center;padding:20px 0">저장된 분석 이력이 없습니다</p>
+      <p style="color:var(--text3);font-size:13px;text-align:center;padding:20px 0">🔍 조회 버튼을 눌러 조회하세요</p>
     </div>
   </div>
 </div>
@@ -1905,9 +2209,59 @@ console.log('✅ Firebase 초기화 완료');
       <div id="certCylList" style="max-height:200px;overflow-y:auto;background:var(--bg3);border-radius:8px;padding:8px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px"></div>
     </div>
 
+    <!-- 규격 혼합 경고 -->
+    <div id="certSizeWarn" style="display:none;margin-top:12px;padding:10px 14px;background:rgba(248,81,73,.12);border:1px solid var(--danger);border-radius:8px;font-size:12px;color:var(--danger);font-weight:700"></div>
+
     <div class="flex-end" style="gap:8px;margin-top:16px">
       <button class="btn" style="background:var(--bg3);border:1px solid var(--border);color:var(--text2)" onclick="closeCertModal()">취소</button>
-      <button class="btn btn-success" onclick="confirmCertDownload()">📥 성적서 엑셀 다운로드</button>
+      <button id="certDownloadBtn" class="btn btn-success" onclick="confirmCertDownload()">📥 엑셀 다운로드</button>
+      <button id="certPdfBtn" class="btn btn-primary" onclick="publishCertPDF()">🖨️ PDF 발행</button>
+    </div>
+  </div>
+</div>
+
+<!-- 업체·출고일 기준 성적서 일괄 발행 모달 -->
+<div id="batchCertModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:9999;align-items:flex-start;justify-content:center;padding:20px;overflow-y:auto">
+  <div style="background:var(--bg2);border-radius:12px;padding:24px;width:680px;max-width:95vw;margin:auto">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+      <div style="font-size:15px;font-weight:700">📦 성적서 일괄 발행 <span style="font-weight:400;font-size:12px;color:var(--text3)">— 업체 · 출고일 기준</span></div>
+      <button onclick="closeBatchCert()" style="background:none;border:none;color:var(--text3);font-size:20px;cursor:pointer">×</button>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1.2fr 1fr auto;gap:10px;align-items:end;margin-bottom:12px">
+      <div class="field" style="margin-bottom:0">
+        <label>납품 업체 <span style="color:var(--danger)">*</span></label>
+        <select id="batchCertComp" style="width:100%" onchange="batchCertSearch()"></select>
+      </div>
+      <div class="field" style="margin-bottom:0">
+        <label>출고일</label>
+        <input type="date" id="batchCertDate" style="width:100%" onchange="batchCertSearch()">
+      </div>
+      <button class="btn btn-primary" onclick="batchCertSearch()">조회</button>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
+      <div class="field" style="margin-bottom:0">
+        <label>발행일 (Issue Date)</label>
+        <input type="date" id="batchCertIssueDate" style="width:100%">
+      </div>
+      <div class="field" style="margin-bottom:0">
+        <label>Valve Type</label>
+        <input type="text" id="batchCertValve" value="W22 - # -RH" style="width:100%;font-family:var(--mono);font-size:12px">
+        <div style="font-size:10px;color:var(--text3);margin-top:2px">Filling Pressure는 가스별 자동 (순수 120 / 혼합 110)</div>
+      </div>
+    </div>
+
+    <div id="batchCertList" style="background:var(--bg3);border-radius:8px;padding:10px;max-height:320px;overflow-y:auto;font-size:12px">
+      <div style="color:var(--text3);text-align:center;padding:16px">업체와 출고일을 선택하세요</div>
+    </div>
+
+    <div id="batchCertStatus" style="margin-top:10px;font-size:12px;color:var(--text3);font-family:var(--mono)"></div>
+
+    <div class="flex-end" style="gap:8px;margin-top:14px">
+      <button class="btn" style="background:var(--bg3);border:1px solid var(--border);color:var(--text2)" onclick="closeBatchCert()">닫기</button>
+      <button id="batchCertDlBtn" class="btn btn-success" onclick="downloadBatchCerts()">📦 엑셀 일괄 (ZIP)</button>
+      <button class="btn btn-primary" onclick="publishBatchCertPDF()">🖨️ PDF 일괄 발행</button>
     </div>
   </div>
 </div>
@@ -1936,13 +2290,69 @@ console.log('✅ Firebase 초기화 완료');
       <input type="date" id="closeHistFrom" style="width:150px">
       <span style="color:var(--text3)">~</span>
       <input type="date" id="closeHistTo" style="width:150px">
-      <button class="btn btn-sm btn-primary" onclick="renderClosingHist()">조회</button>
+      <button class="btn btn-sm btn-primary" onclick="renderClosingHist()">🔍 조회</button>
     </div>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th>마감일</th><th>항목 수</th><th>총 차이</th><th>평균 로스율</th><th>작성자</th><th style="width:80px"></th></tr></thead>
-        <tbody id="closingHistBody"></tbody>
+        <tbody id="closingHistBody"><tr><td colspan="6" style="text-align:center;color:var(--text3);padding:20px">🔍 조회 버튼을 눌러 조회하세요</td></tr></tbody>
       </table>
+    </div>
+  </div>
+</div>
+
+<!-- 용기번호 목록 모달 -->
+<div id="cylListModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:9999;align-items:flex-start;justify-content:center;padding:20px;overflow-y:auto">
+  <div style="background:var(--bg2);border-radius:12px;padding:22px;width:620px;max-width:95vw;margin:auto">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+      <div style="font-size:15px;font-weight:700">📋 보유 용기번호 목록</div>
+      <button onclick="closeCylList()" style="background:none;border:none;color:var(--text3);font-size:20px;cursor:pointer">×</button>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">
+      <span id="cylListTitle" style="font-size:12px;color:var(--text2)"></span>
+      <span id="cylListCount" style="font-family:var(--mono);font-size:12px;font-weight:700;color:var(--accent);margin-left:auto"></span>
+    </div>
+    <div style="background:var(--bg3);border-radius:8px;padding:12px;max-height:400px;overflow-y:auto">
+      <div id="cylListBody"></div>
+    </div>
+    <div style="font-size:11px;color:var(--text3);margin-top:8px">
+      생산 이력에 등록된 용기번호에서 출고된 용기를 제외한, <b>현재 창고에 있어야 할 실병 목록</b>입니다.
+    </div>
+    <div class="flex-end" style="gap:8px;margin-top:12px">
+      <button class="btn btn-sm" style="background:var(--bg3);border:1px solid var(--border);color:var(--text2)" onclick="copyCylList()">📄 목록 복사</button>
+      <button class="btn btn-sm btn-primary" onclick="closeCylList()">닫기</button>
+    </div>
+  </div>
+</div>
+
+<!-- 마감 신규 품목 추가 모달 -->
+<div id="addClItemModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:9999;align-items:center;justify-content:center;padding:20px">
+  <div style="background:var(--bg2);border-radius:12px;padding:22px;width:440px;max-width:95vw">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+      <div style="font-size:15px;font-weight:700">＋ 마감 품목 추가</div>
+      <button onclick="closeAddClosingItem()" style="background:none;border:none;color:var(--text3);font-size:20px;cursor:pointer">×</button>
+    </div>
+    <div class="alert alert-info" style="font-size:11px;margin-bottom:14px">
+      기존 목록에서 선택하거나, 아래 직접입력 칸에 새로 입력하세요. (직접입력이 우선 적용됩니다)
+    </div>
+    <div class="field">
+      <label>가스 품목</label>
+      <select id="addClItemGas" style="width:100%"></select>
+      <input type="text" id="addClItemGasNew" placeholder="직접입력 (예: N₂ — 고순도)" style="width:100%;margin-top:5px">
+    </div>
+    <div class="field">
+      <label>규격</label>
+      <select id="addClItemSize" style="width:100%"></select>
+      <input type="text" id="addClItemSizeNew" placeholder="직접입력 (예: 47L · 130bar)" style="width:100%;margin-top:5px">
+    </div>
+    <div class="field">
+      <label>업체</label>
+      <select id="addClItemComp" style="width:100%"></select>
+      <input type="text" id="addClItemCompNew" placeholder="직접입력" style="width:100%;margin-top:5px">
+    </div>
+    <div class="flex-end" style="gap:8px;margin-top:14px">
+      <button class="btn" style="background:var(--bg3);border:1px solid var(--border);color:var(--text2)" onclick="closeAddClosingItem()">취소</button>
+      <button class="btn btn-success" onclick="saveAddClosingItem()">✅ 품목 추가</button>
     </div>
   </div>
 </div>
@@ -2425,6 +2835,10 @@ console.log('✅ Firebase 초기화 완료');
 </div>
 <script>
 // ══════ STATE ══════
+// 이력 조회 상태 플래그 — 조회 버튼을 눌러 조회한 뒤에만 저장 후 자동 갱신
+let prodHistSearched = false, txnHistSearched = false, ordHistSearched = false;
+let incHistSearched = false, cartHistSearched = false;
+
 const STORE_KEY_INV = 'gasims_inventory_v2';
 const STORE_KEY_LOG = 'gasims_log_v2';
 
@@ -2433,6 +2847,8 @@ function load(key, def) {
   try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : def; } catch { return def; }
 }
 function save(key, val) {
+  // 생산·출고 로그가 바뀌면 용기번호 재고 캐시 무효화 (이력 수정 시에도 정확히 반영)
+  if (key === STORE_KEY_LOG && window._invalidateCylCache) window._invalidateCylCache();
   // localStorage에 즉시 저장 (오프라인 대비)
   localStorage.setItem(key, JSON.stringify(val));
   // Firebase에 비동기 저장 (연결 시 자동 업로드)
@@ -2666,6 +3082,62 @@ function uniqueVals(arr, key) {
 // ══════ INIT ══════
 document.getElementById('hdrDate').textContent = today();
 
+// ══════ Firestore 읽기 사용량 표시 (할당량 모니터링) ══════
+// 화면 우하단에 오늘 읽기 횟수를 표시. 무료 한도 50,000회 대비 사용률 확인용.
+function initReadMeter() {
+  const KEY = 'gasims_readmeter_v1';
+  const LIMIT = 50000;
+
+  function load() {
+    try {
+      const o = JSON.parse(localStorage.getItem(KEY) || '{}');
+      return (o.date === today()) ? o : { date: today(), count: 0 };
+    } catch(e) { return { date: today(), count: 0 }; }
+  }
+  let stat = load();
+  let lastSeen = window._readCount || 0;
+
+  let box = document.getElementById('readMeter');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'readMeter';
+    box.style.cssText = 'position:fixed;right:12px;bottom:12px;z-index:9998;background:var(--bg2);border:1px solid var(--border);' +
+      'border-radius:8px;padding:6px 10px;font-size:11px;font-family:var(--mono);color:var(--text3);cursor:pointer;opacity:.75;' +
+      'box-shadow:0 2px 8px rgba(0,0,0,.3);user-select:none';
+    box.title = 'Firestore 읽기 사용량 (오늘) — 클릭하면 상세 정보';
+    box.onclick = () => {
+      const pct = (stat.count / LIMIT * 100).toFixed(1);
+      const mode = window._listenerHealthy ? '실시간 리스너 정상 (5분 안전망 폴링)' : 'REST 폴백 모드 (60초 폴링)';
+      alert(
+        `📊 Firestore 사용량 (오늘)\n\n` +
+        `읽기: ${stat.count.toLocaleString()} / ${LIMIT.toLocaleString()} 회 (${pct}%)\n` +
+        `동기화 모드: ${mode}\n` +
+        `마지막 동기화: ${window._lastSync || '—'}\n\n` +
+        `※ 이 기기에서 발생한 읽기만 집계됩니다.\n` +
+        `   전체 사용량은 Firebase Console → 사용량 및 청구에서 확인하세요.`
+      );
+    };
+    document.body.appendChild(box);
+  }
+
+  function render() {
+    const cur = window._readCount || 0;
+    if (cur > lastSeen) { stat.count += (cur - lastSeen); lastSeen = cur; }
+    if (stat.date !== today()) { stat = { date: today(), count: 0 }; }
+    localStorage.setItem(KEY, JSON.stringify(stat));
+
+    const pct = stat.count / LIMIT * 100;
+    const color = pct > 80 ? 'var(--danger)' : pct > 50 ? 'var(--warn)' : 'var(--text3)';
+    const icon  = window._listenerHealthy ? '⚡' : '🔄';
+    box.style.color = color;
+    box.style.borderColor = pct > 80 ? 'var(--danger)' : 'var(--border)';
+    box.innerHTML = `${icon} 읽기 ${stat.count.toLocaleString()} <span style="opacity:.6">/ ${(LIMIT/1000)}k (${pct.toFixed(1)}%)</span>`;
+  }
+  render();
+  setInterval(render, 3000);
+}
+window.addEventListener('load', () => setTimeout(initReadMeter, 1500));
+
 // 연결 상태 배너
 function showSyncStatus(msg, color) {
   let bar = document.getElementById('syncStatusBar');
@@ -2679,8 +3151,13 @@ function showSyncStatus(msg, color) {
   bar.style.background = color;
   bar.style.color = '#fff';
   bar.style.opacity = '1';
-  if (color === 'var(--accent)' || color === '#2ea043') {
-    setTimeout(() => { bar.style.opacity = '0'; }, 2500);
+
+  // 경고·오류(노랑/빨강)만 계속 표시하고, 나머지 안내 메시지는 자동으로 사라짐
+  // (기존에는 파란색 동기화 배너가 자동 숨김 대상에서 빠져 영구히 남아 있었음)
+  if (bar._hideTimer) { clearTimeout(bar._hideTimer); bar._hideTimer = null; }
+  const persistent = (color === '#d29922' || color === '#f85149' || color === 'var(--danger)' || color === 'var(--warn)');
+  if (!persistent) {
+    bar._hideTimer = setTimeout(() => { bar.style.opacity = '0'; }, 2500);
   }
 }
 
@@ -2690,11 +3167,14 @@ window.onFsUpdate = function(key, val) {
     case STORE_KEY_INV:
       inventory = val;
       { let ch=false; inventory.forEach(it=>{ if(migrateMixGasItem(it)) ch=true; }); if(ch) save(STORE_KEY_INV,inventory); }
-      if(document.getElementById('page-closing')?.style.display!=='none') loadClosingSnapshot();
+      _invalidateCylCache();
+      // 마감 화면을 실제로 보고 있을 때만 갱신 (기존 style.display 검사는 항상 참이었음)
+      if(document.getElementById('page-closing')?.classList.contains('active')) loadClosingSnapshot();
       break;
     case STORE_KEY_LOG:
       logs = val;
       { let ch=false; logs.forEach(it=>{ if(migrateMixGasItem(it)) ch=true; }); if(ch) save(STORE_KEY_LOG,logs); }
+      _invalidateCylCache();
       break;
     case STORE_KEY_RAW:
       rawMaterials = val;
@@ -2719,9 +3199,13 @@ window.onFsUpdate = function(key, val) {
     case STORE_KEY_CLOSING:  monthlyClosing = val; renderClosingList && renderClosingList(); break;
     case STORE_KEY_DAYCLOSE: dailyClosing = val; renderClosingHist && renderClosingHist(); break;
   }
-  // UI 갱신 (현재 보이는 탭만)
-  renderAll();
-  showSyncStatus('🔄 다른 기기에서 데이터가 업데이트됐습니다', '#1158a7');
+  // UI 갱신 — 여러 키가 동시에 수신되면 한 번만 갱신되도록 묶음 처리
+  // (기존에는 키 개수만큼 renderAll이 연속 호출되어 화면이 계속 새로고침되는 현상이 있었음)
+  if (window._fsUiTimer) clearTimeout(window._fsUiTimer);
+  window._fsUiTimer = setTimeout(() => {
+    renderAll();
+    showSyncStatus('🔄 다른 기기에서 데이터가 업데이트됐습니다', '#1158a7');
+  }, 400);
 };
 
 // Firebase에서 최신 데이터 로드 후 초기화
@@ -3269,14 +3753,30 @@ function getMixParts() {
     // extract short symbol: "He (헬륨)" → "He"
     gas = gas.split(' ')[0];
     const pct = parseFloat(row.querySelector('.mix-pct-inp').value) || 0;
-    if (gas) parts.push({ gas, pct });
+    if (gas && pct > 0) parts.push({ gas, pct });   // 0% 성분은 품명에 포함하지 않음
   });
   return parts;
 }
 
 function buildMixName(parts) {
   if (!parts.length) return '';
-  return parts.map(p => p.pct ? `${p.pct}%${p.gas}` : p.gas).join('+');
+  // 0% 성분은 품명에서 제외한다.
+  // (pct === null 은 Balance 가스이므로 %없이 그대로 표기)
+  const kept = parts.filter(p => p.gas && !(p.pct != null && Number(p.pct) === 0));
+  if (!kept.length) return '';
+  return kept.map(p => (p.pct != null && Number(p.pct) !== 0) ? `${p.pct}%${p.gas}` : p.gas).join('+');
+}
+
+// 이미 만들어진 품명에서 "0%성분"을 제거 — 예: 3%H2+0%N2+97%Ar → 3%H2+97%Ar
+function stripZeroPct(name) {
+  if (!name || typeof name !== 'string' || !name.includes('%')) return name;
+  if (name.startsWith('혼합')) return name;           // 구형식은 convertMixName이 처리
+  if (!name.includes('+')) return name;
+  const parts = name.split('+');
+  const kept = parts.filter(s => !/^0+(?:\.0+)?%/.test(s.trim()));
+  if (kept.length === parts.length) return name;      // 변경 없음
+  if (kept.length < 2) return name;                   // 성분이 1개 이하로 줄면 위험 → 원본 유지
+  return kept.join('+');
 }
 
 function getMixGasName() {
@@ -3297,11 +3797,11 @@ function nav(id) {
   event.target.classList.add('active');
   if (id === 'dash') renderDash();
   if (id === 'base')     { renderBase(); renderClientList(); renderExpireSettings(); }
-  if (id === 'prod') { initProdPage(); renderTodayProdLog(); }
-  if (id === 'cart')     { initCartPage(); renderTodayCartLog(); }
-  if (id === 'incoming') { initIncomingPage(); }
+  if (id === 'prod') { initProdPage(); renderTodayProdLog(); initProdHist(); }
+  if (id === 'cart')     { initCartPage(); renderTodayCartLog(); initCartHistFilters(); if (cartHistSearched) renderCartHist(); refreshCartFixBanner(); }
+  if (id === 'incoming') { initIncomingPage(); initIncHistFilters(); if (incHistSearched) renderIncHist(); }
   if (id === 'order')    { initOrderPage(); }
-  if (id === 'txn')      { renderTodayLog(); }
+  if (id === 'txn')      { renderTodayLog(); initTxnShipHist(); }
   if (id === 'analysis') { initAnalysisPage(); }
   if (id === 'closing')  { initClosingPage(); }
   if (id === 'hist')     { populateHistFilters(); renderHist(); }
@@ -3610,7 +4110,8 @@ function updatePmix() {
   // Product Name 미리보기
   const previewEl = document.getElementById('pmixPreview');
   if (previewEl) {
-    const validParts = parts.filter(p => p.gas);
+    // 0% 성분은 미리보기에서도 제외 (확정 시 생성될 품명과 동일하게 표시)
+    const validParts = parts.filter(p => p.gas && !(!p.bal && p.pct != null && Number(p.pct) === 0));
     if (validParts.length < 2) {
       previewEl.textContent = '—';
     } else {
@@ -4219,6 +4720,7 @@ function saveProd() {
   alert(`✅ 저장 완료!\nLOT: ${lotNo}\n충전 용기: ${count}개${deductSummary}`);
   initProdPage();
   renderTodayProdLog();
+  initProdHist();
   renderDash();
 }
 
@@ -4475,6 +4977,7 @@ function saveProdEdit() {
 
   closeProdEdit();
   renderTodayProdLog();
+  initProdHist();
   renderHist();
   renderInv && renderInv();
   renderRawTiles && renderRawTiles();
@@ -4488,6 +4991,99 @@ function saveProdEdit() {
     }
   }
   alert(msg);
+}
+
+// ══════ 생산 이력 조회 ══════
+function initProdHist() {
+  const fromEl = document.getElementById('prodHistFrom');
+  const toEl   = document.getElementById('prodHistTo');
+  if (fromEl && !fromEl.value) {
+    const d = new Date(); d.setDate(d.getDate() - 6);
+    fromEl.value = d.toISOString().slice(0,10);
+  }
+  if (toEl && !toEl.value) toEl.value = today();
+
+  const prodLogs = logs.filter(l => l.type === 'produce');
+  // 가스 드롭다운
+  const gasSel = document.getElementById('prodHistGas');
+  if (gasSel) {
+    const cur = gasSel.value;
+    const gases = [...new Set(prodLogs.map(l => l.gas).filter(Boolean))].sort();
+    gasSel.innerHTML = '<option value="">전체</option>' +
+      gases.map(g => `<option value="${g}" ${g === cur ? 'selected' : ''}>${g}</option>`).join('');
+  }
+  // 업체 드롭다운
+  const compSel = document.getElementById('prodHistComp');
+  if (compSel) {
+    const cur = compSel.value;
+    const comps = [...new Set(prodLogs.map(l => l.company).filter(Boolean))].sort();
+    compSel.innerHTML = '<option value="">전체</option>' +
+      comps.map(c => `<option value="${c}" ${c === cur ? 'selected' : ''}>${c}</option>`).join('');
+  }
+  // 조회 버튼을 눌렀을 때만 결과 표시 (이미 조회한 경우에는 갱신)
+  if (prodHistSearched) renderProdHist();
+}
+
+function prodHistQuick(days) {
+  const d = new Date(); d.setDate(d.getDate() - (days - 1));
+  document.getElementById('prodHistFrom').value = d.toISOString().slice(0,10);
+  document.getElementById('prodHistTo').value   = today();
+  renderProdHist();
+}
+
+function renderProdHist() {
+  const tbody = document.getElementById('prodHistBody');
+  if (!tbody) return;
+  const from = document.getElementById('prodHistFrom')?.value || '';
+  const to   = document.getElementById('prodHistTo')?.value || '';
+  const gas  = document.getElementById('prodHistGas')?.value || '';
+  const comp = document.getElementById('prodHistComp')?.value || '';
+  const countEl = document.getElementById('prodHistCount');
+
+  const rows = logs
+    .filter(l => l.type === 'produce')
+    .filter(l => (!from || l.date >= from) && (!to || l.date <= to))
+    .filter(l => (!gas || l.gas === gas))
+    .filter(l => (!comp || l.company === comp))
+    .slice()
+    .sort((a,b) => (b.date + (b.time || '')).localeCompare(a.date + (a.time || '')));
+
+  prodHistSearched = true;
+  if (countEl) countEl.textContent = rows.length ? `총 ${rows.length}건 · 실병 ${rows.reduce((s,l)=>s+(l.dFull||0),0)}개 생산` : '';
+
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text3);padding:20px">해당 기간 생산 이력이 없습니다</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = rows.map(l => {
+    const cylCnt = (l.containers || []).length;
+    const hasAn  = l.lotNo && analysisData.some(a => a.lotNo === l.lotNo);
+    const anBtn = l.lotNo
+      ? (hasAn
+          ? '<span style="font-size:11px;color:var(--accent)">✓ 완료</span>'
+          : `<button class="btn btn-sm" onclick="goAnalysisFromProd('${l.lotNo}')" style="background:rgba(210,153,34,.15);border:1px solid var(--warn);color:var(--warn);white-space:nowrap;padding:2px 8px;font-size:11px">분석 입력</button>`)
+      : '<span style="font-size:11px;color:var(--text3)">—</span>';
+
+    return `<tr>
+      <td style="font-family:var(--mono);font-size:12px">${l.date}</td>
+      <td style="font-family:var(--mono);font-size:11px;color:var(--accent)">${l.lotNo || '—'}</td>
+      <td>${l.gas}</td>
+      <td style="font-family:var(--mono);font-size:12px">${l.size}</td>
+      <td>${l.company}</td>
+      <td class="num" style="font-family:var(--mono)">+${l.dFull}${cylCnt ? `<div style="font-size:10px;color:var(--text3)">용기 ${cylCnt}</div>` : ''}</td>
+      <td>${anBtn}</td>
+      <td><button class="btn btn-sm" onclick="openProdEdit('${l.id}')" style="background:rgba(56,139,253,.15);border:1px solid var(--accent2);color:var(--accent2);white-space:nowrap;padding:2px 8px;font-size:11px">✏️ 수정</button></td>
+    </tr>`;
+  }).join('');
+}
+
+// 생산 이력에서 "분석 입력" → 분석/성적서 페이지로 이동 후 해당 LOT 폼 열기
+function goAnalysisFromProd(lotNo) {
+  nav('analysis');
+  setTimeout(() => {
+    if (typeof openAnForm === 'function') openAnForm(lotNo);
+  }, 100);
 }
 
 function renderTodayProdLog() {
@@ -4930,12 +5526,12 @@ function populateTxnLots() {
   const listEl = document.getElementById('txnLotList');
   if (!listEl) return;
 
-  // 1) 생산 로그에서 LOT 수집
+  // 1) 생산 로그에서 LOT 수집 (실린더별 규격도 함께 저장 — 47L/10L 혼합 LOT 대응)
   const produceLots = {};
   logs.filter(l => l.type === 'produce' && l.lotNo).forEach(l => {
     if (!produceLots[l.lotNo]) {
       produceLots[l.lotNo] = {
-        lotNo: l.lotNo, gas: l.gas, size: l.size, date: l.date, containers: [],
+        lotNo: l.lotNo, gas: l.gas, size: l.size, date: l.date, containers: [], cylSizes: {},
       };
     }
     (l.containers || []).forEach(c => {
@@ -4943,13 +5539,14 @@ function populateTxnLots() {
       if (no && !produceLots[l.lotNo].containers.includes(no)) {
         produceLots[l.lotNo].containers.push(no);
       }
+      if (no) produceLots[l.lotNo].cylSizes[no] = l.size;
     });
   });
 
   // 2) analysisData 덮어쓰기
   analysisData.forEach(a => {
     if (!a.lotNo) return;
-    const base = produceLots[a.lotNo] || { lotNo: a.lotNo, gas: a.gas, size: a.size, date: a.date, containers: [] };
+    const base = produceLots[a.lotNo] || { lotNo: a.lotNo, gas: a.gas, size: a.size, date: a.date, containers: [], cylSizes: {} };
     const anConts = (a.containers || []).map(c => typeof c === 'string' ? c : (c.container || c)).filter(Boolean);
     produceLots[a.lotNo] = {
       ...base,
@@ -4971,9 +5568,16 @@ function populateTxnLots() {
   // 4) 필터링
   let available = Object.values(produceLots).filter(lot => {
     if (!gas || lot.gas !== gas) return false;
-    if (size && lot.size !== size) return false;
     const shipped = shippedCylsByLot[lot.lotNo] || new Set();
-    lot._remainingCyls = lot.containers.filter(no => !shipped.has(no));
+    // 규격 필터: 실린더 단위로 적용 — 혼합 LOT에서 선택 규격의 실린더만 표시
+    lot._remainingCyls = lot.containers.filter(no => {
+      if (shipped.has(no)) return false;
+      if (size) {
+        const cylSize = (lot.cylSizes && lot.cylSizes[no]) || lot.size;
+        if (cylSize !== size) return false;
+      }
+      return true;
+    });
     return lot._remainingCyls.length > 0;
   });
 
@@ -5146,7 +5750,11 @@ function saveTxn() {
       closeTxn();
       renderTodayLog();
       renderDash();
-      alert(`✅ ${lotKeys.length}개 LOT로 총 ${actualFull}개 출고 저장됐습니다.\n이력 조회에서 LOT별로 성적서 발행 가능합니다.`);
+      initTxnShipHist();
+      // 출고 완료 → 출고된 품목 그대로 즉시 성적서 발행 제안
+      if (confirm(`✅ ${lotKeys.length}개 LOT로 총 ${actualFull}개 출고 저장됐습니다.\n\n방금 출고한 품목의 성적서를 지금 바로 발행하시겠습니까?\n(업체·출고일 기준 일괄 발행 화면이 열립니다)`)) {
+        openBatchCert(comp, date);
+      }
       return;
     }
 
@@ -5189,7 +5797,93 @@ function saveTxn() {
   closeTxn();
   renderTodayLog();
   renderDash();
+  initTxnShipHist();
   alert('✅ 저장되었습니다.');
+}
+
+// ══════ 출고 이력 조회 (출고/조정 페이지) ══════
+function initTxnShipHist() {
+  const fromEl = document.getElementById('txnHistFrom');
+  const toEl   = document.getElementById('txnHistTo');
+  if (fromEl && !fromEl.value) {
+    // 기본: 최근 7일
+    const d = new Date(); d.setDate(d.getDate() - 6);
+    fromEl.value = d.toISOString().slice(0,10);
+  }
+  if (toEl && !toEl.value) toEl.value = today();
+
+  // 업체 드롭다운 — 출고 이력에 등장하는 업체
+  const compSel = document.getElementById('txnHistComp');
+  if (compSel) {
+    const cur = compSel.value;
+    const comps = [...new Set(logs.filter(l => l.type === 'ship').map(l => l.company).filter(Boolean))].sort();
+    compSel.innerHTML = '<option value="">전체</option>' +
+      comps.map(c => `<option value="${c}" ${c === cur ? 'selected' : ''}>${c}</option>`).join('');
+  }
+  if (txnHistSearched) renderTxnShipHist();
+}
+
+function txnHistQuick(days) {
+  const d = new Date(); d.setDate(d.getDate() - (days - 1));
+  document.getElementById('txnHistFrom').value = d.toISOString().slice(0,10);
+  document.getElementById('txnHistTo').value   = today();
+  renderTxnShipHist();
+}
+
+function renderTxnShipHist() {
+  const tbody = document.getElementById('txnShipHistBody');
+  if (!tbody) return;
+  const from = document.getElementById('txnHistFrom')?.value;
+  const to   = document.getElementById('txnHistTo')?.value;
+  const comp = document.getElementById('txnHistComp')?.value;
+
+  const rows = logs
+    .filter(l => l.type === 'ship')
+    .filter(l => (!from || l.date >= from) && (!to || l.date <= to))
+    .filter(l => (!comp || l.company === comp))
+    .slice()
+    .sort((a,b) => (b.date + (b.time||'')).localeCompare(a.date + (a.time||'')));
+
+  txnHistSearched = true;
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text3);padding:20px">해당 기간 출고 이력이 없습니다</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = rows.map(l => {
+    const qty = Math.abs(l.dFull || 0);
+    const cylCnt = (l.cylinders || []).length;
+    const lotInfo = l.lotNo
+      ? `<span style="font-family:var(--mono);font-size:11px;color:var(--accent2)">${l.lotNo}</span>${cylCnt ? `<span style="font-size:10px;color:var(--text3);margin-left:6px">${cylCnt}병</span>` : ''}`
+      : '<span style="font-size:11px;color:var(--text3)">LOT 없음</span>';
+
+    let certBtn;
+    if (l.lotNo) {
+      const hasAn = analysisData.some(a => a.lotNo === l.lotNo);
+      certBtn = hasAn
+        ? `<button class="btn btn-sm" onclick="openCertFromShipLog('${l.id}')" style="background:rgba(46,164,79,.15);border:1px solid var(--accent);color:var(--accent);white-space:nowrap">📋 발행</button>`
+        : `<span style="font-size:11px;color:var(--warn)">분석 미입력</span>`;
+    } else {
+      certBtn = '<span style="font-size:11px;color:var(--text3)">—</span>';
+    }
+
+    return `<tr>
+      <td style="font-family:var(--mono);font-size:12px">${l.date}</td>
+      <td>${l.gas}</td>
+      <td style="font-family:var(--mono);font-size:12px">${l.size}</td>
+      <td>${l.company}</td>
+      <td class="num" style="font-family:var(--mono)">${qty}</td>
+      <td>${lotInfo}${l.memo ? `<div style="font-size:10px;color:var(--text3);margin-top:2px">${l.memo}</div>` : ''}</td>
+      <td>${certBtn}</td>
+    </tr>`;
+  }).join('');
+}
+
+// 현재 조회 조건(업체·종료일)을 일괄 발행 모달로 넘기기
+function openBatchCertFromTxn() {
+  const comp = document.getElementById('txnHistComp')?.value || '';
+  const date = document.getElementById('txnHistTo')?.value || today();
+  openBatchCert(comp, date);
 }
 
 function renderTodayLog() {
@@ -5221,22 +5915,143 @@ function initClosingPage() {
   if (!document.getElementById('closeHistFrom').value) document.getElementById('closeHistFrom').value = t;
   if (!document.getElementById('closeHistTo').value)   document.getElementById('closeHistTo').value   = t;
   loadClosingSnapshot();
-  renderClosingHist();
+  // 마감 이력은 조회 버튼으로만 조회
 }
 
 // 전산 재고 스냅샷 계산
+// ══════ 용기번호 기반 실병 재고 계산 ══════
+// 생산 이력의 용기번호(입고) − 출고 이력의 용기번호(출고)를 시간순으로 처리해
+// "지금 현재 창고에 있어야 할 실병 용기 목록"을 산출한다. (재충전 재사용도 정확히 반영)
+let _cylStockCache = null, _cylStockSig = '';
+function _invalidateCylCache() { _cylStockCache = null; _cylStockSig = ''; }
+window._invalidateCylCache = _invalidateCylCache;
+
+function computeCylStock() {
+  // 실사 입력 중 매 글자마다 전체 로그를 재계산하지 않도록 캐싱
+  // (로그가 늘어날수록 비용이 커져 입력이 버벅이는 문제 방지)
+  const sig = logs.length + '|' + (logs.length ? (logs[logs.length-1].id || '') : '');
+  if (_cylStockCache && _cylStockSig === sig) return _cylStockCache;
+
+  const events = [];
+
+  logs.forEach(l => {
+    if (l.type === 'produce' && Array.isArray(l.containers)) {
+      l.containers.forEach(c => {
+        const no = typeof c === 'string' ? c : (c.container || c.no);
+        if (!no) return;
+        const size = (typeof c === 'object' && c.size) ? c.size : l.size;
+        const comp = (typeof c === 'object' && c.company) ? c.company : l.company;
+        events.push({
+          t: `${l.date || ''} ${l.time || ''}`, no: String(no).trim(), action: 'in',
+          key: `${l.gas}|${size}|${comp}`, gas: l.gas, size, company: comp,
+          lotNo: l.lotNo || '', date: l.date || ''
+        });
+      });
+    } else if (l.type === 'ship' && Array.isArray(l.cylinders)) {
+      l.cylinders.forEach(no => {
+        if (!no) return;
+        events.push({ t: `${l.date || ''} ${l.time || ''}`, no: String(no).trim(), action: 'out' });
+      });
+    }
+  });
+
+  events.sort((a, b) => a.t.localeCompare(b.t));
+
+  // 용기번호별 최종 상태 — 생산되면 보유, 출고되면 제거
+  const state = {};
+  events.forEach(e => {
+    if (e.action === 'in') state[e.no] = e;
+    else delete state[e.no];
+  });
+
+  // 품목별 그룹핑
+  const byItem = {};
+  Object.entries(state).forEach(([no, e]) => {
+    if (!byItem[e.key]) byItem[e.key] = { key: e.key, gas: e.gas, size: e.size, company: e.company, cylinders: [] };
+    byItem[e.key].cylinders.push({ no, lotNo: e.lotNo, date: e.date });
+  });
+  Object.values(byItem).forEach(g => g.cylinders.sort((a, b) => a.no.localeCompare(b.no)));
+  _cylStockCache = byItem;
+  _cylStockSig = sig;
+  return byItem;
+}
+
+// 용기번호 목록 모달
+let cylListCache = {};
+function showCylList(key) {
+  const g = cylListCache[key];
+  if (!g || !g.cylinders.length) { alert('등록된 용기번호가 없습니다.'); return; }
+  // LOT별 그룹핑
+  const byLot = {};
+  g.cylinders.forEach(c => {
+    const k = c.lotNo || '(LOT 없음)';
+    if (!byLot[k]) byLot[k] = { date: c.date, list: [] };
+    byLot[k].list.push(c.no);
+  });
+  document.getElementById('cylListTitle').textContent = `${g.gas} · ${g.size} · ${g.company}`;
+  document.getElementById('cylListCount').textContent = `총 ${g.cylinders.length}병`;
+  document.getElementById('cylListBody').innerHTML = Object.entries(byLot)
+    .sort((a, b) => (b[1].date || '').localeCompare(a[1].date || ''))
+    .map(([lot, v]) => `
+      <div style="margin-bottom:12px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:5px">
+          <span style="font-family:var(--mono);font-weight:700;color:var(--accent);font-size:12px">${lot}</span>
+          <span style="font-size:11px;color:var(--text3)">생산 ${v.date || '—'}</span>
+          <span style="font-size:11px;color:var(--text3);margin-left:auto">${v.list.length}병</span>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:4px">
+          ${v.list.map(n => `<span style="font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border);padding:2px 7px;border-radius:4px">${n}</span>`).join('')}
+        </div>
+      </div>`).join('');
+  document.getElementById('cylListModal').style.display = 'flex';
+}
+function closeCylList() { document.getElementById('cylListModal').style.display = 'none'; }
+
+// 용기번호 목록 텍스트 복사
+function copyCylList() {
+  const txt = document.getElementById('cylListBody').innerText;
+  navigator.clipboard?.writeText(txt).then(
+    () => alert('✅ 용기번호 목록이 복사되었습니다.'),
+    () => alert('복사에 실패했습니다.')
+  );
+}
+
 function computeClosingSnapshot() {
   const snap = { finished: [], tanks: [], cylinders: [], cartridge: null };
 
-  // 완제품 (품목별 실병/공병)
+  // 완제품 (품목별 실병/공병) — 용기번호 기반 실병 목록 병합
+  const cylStock = computeCylStock();
+  cylListCache = cylStock;
+  const includeZero = document.getElementById('closeIncludeZero')?.checked;
+  const seen = new Set();
+
   inventory.forEach(r => {
-    if ((r.full||0) === 0 && (r.empty||0) === 0) return;
+    const key = `${r.gas}|${r.size}|${r.company}`;
+    seen.add(key);
+    const cs = cylStock[key];
+    const cylCount = cs ? cs.cylinders.length : 0;
+    // 재고 0 + 용기 0 이면 기본 제외 (단, "재고 0 품목 포함" 체크 시 표시)
+    if (!includeZero && (r.full||0) === 0 && (r.empty||0) === 0 && cylCount === 0) return;
     snap.finished.push({
-      key: `${r.gas}|${r.size}|${r.company}`,
-      gas: r.gas, size: r.size, company: r.company,
-      sysFull: r.full||0, sysEmpty: r.empty||0
+      key, gas: r.gas, size: r.size, company: r.company,
+      sysFull: r.full||0, sysEmpty: r.empty||0,
+      cylCount, cylList: cs ? cs.cylinders : [],
+      isNew: false
     });
   });
+
+  // 용기번호는 있는데 기초재고에 품목이 없는 경우 (신규 품목) — 누락 없이 표시
+  Object.values(cylStock).forEach(g => {
+    if (seen.has(g.key)) return;
+    snap.finished.push({
+      key: g.key, gas: g.gas, size: g.size, company: g.company,
+      sysFull: 0, sysEmpty: 0,
+      cylCount: g.cylinders.length, cylList: g.cylinders,
+      isNew: true
+    });
+  });
+
+  snap.finished.sort((a,b) => (a.gas+a.size+a.company).localeCompare(b.gas+b.size+b.company));
 
   // He / N₂ / Ar 탱크 (kg)
   const he = rawMaterials.He || {};
@@ -5273,7 +6088,15 @@ function loadClosingSnapshot() {
 
   // 기존 저장된 마감이 있으면 실사값 불러오기
   const saved = dailyClosing.find(c => c.date === date);
-  const actual = saved ? saved.actual : {};
+  const actual = saved ? JSON.parse(JSON.stringify(saved.actual || {})) : {};
+
+  // 화면에 입력 중이던(아직 저장 안 한) 실사값은 덮어쓰지 않고 보존
+  document.querySelectorAll('.cl-in').forEach(inp => {
+    if (inp.value === '') return;
+    const cat = inp.dataset.cat, key = inp.dataset.key, field = inp.dataset.field;
+    if (cat === 'tank') actual[key] = parseFloat(inp.value);
+    else { if (!actual[key] || typeof actual[key] !== 'object') actual[key] = {}; actual[key][field] = parseInt(inp.value); }
+  });
 
   const wrap = document.getElementById('closingBody');
 
@@ -5284,11 +6107,22 @@ function loadClosingSnapshot() {
     const aEmpty = a.empty ?? '';
     const diffFull  = aFull !== '' ? (parseInt(aFull) - f.sysFull) : null;
     const lossF = (diffFull !== null && f.sysFull !== 0) ? (diffFull / f.sysFull * 100) : null;
-    return `<tr>
-      <td style="font-size:12px">${f.gas}</td>
+    // 용기번호 기반 확인 수량 vs 카운터 재고 불일치 체크
+    const cylCount = f.cylCount || 0;
+    const mismatch = cylCount !== f.sysFull;
+    const cylCell = cylCount > 0
+      ? `<button onclick="showCylList('${f.key.replace(/'/g,"\\'")}')" title="용기번호 목록 보기"
+           style="background:${mismatch?'rgba(210,153,34,.15)':'rgba(46,164,79,.15)'};border:1px solid ${mismatch?'var(--warn)':'var(--accent)'};color:${mismatch?'var(--warn)':'var(--accent)'};
+                  border-radius:5px;padding:2px 8px;font-family:var(--mono);font-size:11px;cursor:pointer;white-space:nowrap">
+           ${mismatch?'⚠️ ':'📋 '}${cylCount}병</button>`
+      : '<span style="font-size:11px;color:var(--text3)">—</span>';
+
+    return `<tr${f.isNew ? ' style="background:rgba(56,139,253,.06)"' : ''}>
+      <td style="font-size:12px">${f.gas}${f.isNew ? ' <span style="font-size:9px;background:var(--accent2);color:#fff;padding:1px 5px;border-radius:3px;margin-left:4px">신규</span>' : ''}</td>
       <td style="font-size:12px">${f.size}</td>
       <td style="font-size:12px">${f.company}</td>
       <td class="num" style="color:var(--text3)">${f.sysFull}</td>
+      <td>${cylCell}</td>
       <td><input type="number" class="cl-in" data-cat="finished" data-key="${f.key}" data-field="full" value="${aFull}" placeholder="실병" style="width:70px;text-align:right" oninput="recalcClosing()"></td>
       <td class="num cl-diff" data-for="finished|${f.key}|full">${diffFull!==null?fmtDiff(diffFull):'—'}</td>
       <td class="num" style="color:var(--text3)">${f.sysEmpty}</td>
@@ -5362,14 +6196,63 @@ function loadClosingSnapshot() {
       </table>
     </div>
 
-    <div style="font-size:13px;font-weight:700;color:var(--teal);margin:16px 0 6px">📦 완제품 재고 (품목별)</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin:16px 0 6px">
+      <div style="font-size:13px;font-weight:700;color:var(--teal)">📦 완제품 재고 (품목별)</div>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <label style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text2);cursor:pointer">
+          <input type="checkbox" id="closeIncludeZero" ${document.getElementById('closeIncludeZero')?.checked ? 'checked' : ''}
+                 onchange="loadClosingSnapshot()" style="width:13px;height:13px;accent-color:var(--accent)">
+          재고 0 품목도 표시
+        </label>
+        <button class="btn btn-sm" onclick="openAddClosingItem()"
+          style="background:rgba(56,139,253,.15);border:1px solid var(--accent2);color:var(--accent2);font-size:11px;padding:3px 10px">+ 품목 추가</button>
+      </div>
+    </div>
+    <div style="font-size:11px;color:var(--text3);margin-bottom:6px">
+      💡 <b>용기확인</b> = 생산·출고 이력의 용기번호로 자동 계산한 실병 수량입니다. 클릭하면 용기번호 목록을 볼 수 있고,
+      전산 수량과 다르면 <span style="color:var(--warn)">⚠️</span> 로 표시됩니다.
+    </div>
     <div class="tbl-wrap">
       <table>
-        <thead><tr><th>가스</th><th>규격</th><th>업체</th><th>전산(실)</th><th>실사(실)</th><th>차이</th><th>전산(공)</th><th>실사(공)</th><th>차이</th></tr></thead>
-        <tbody>${finishedRows || '<tr><td colspan="9" style="text-align:center;color:var(--text3);padding:20px">완제품 재고 없음</td></tr>'}</tbody>
+        <thead><tr><th>가스</th><th>규격</th><th>업체</th><th>전산(실)</th><th>용기확인</th><th>실사(실)</th><th>차이</th><th>전산(공)</th><th>실사(공)</th><th>차이</th></tr></thead>
+        <tbody>${finishedRows || '<tr><td colspan="10" style="text-align:center;color:var(--text3);padding:20px">완제품 재고 없음</td></tr>'}</tbody>
       </table>
     </div>
   `;
+}
+
+// ══════ 마감 화면에서 신규 품목 즉석 추가 ══════
+function openAddClosingItem() {
+  const gases = [...new Set(inventory.map(r => r.gas).filter(Boolean))].sort();
+  const sizes = [...new Set(inventory.map(r => r.size).filter(Boolean))].sort();
+  const comps = [...new Set(inventory.map(r => r.company).filter(Boolean))].sort();
+  document.getElementById('addClItemGas').innerHTML  = gases.map(g => `<option>${g}</option>`).join('');
+  document.getElementById('addClItemSize').innerHTML = sizes.map(s => `<option>${s}</option>`).join('');
+  document.getElementById('addClItemComp').innerHTML = comps.map(c => `<option>${c}</option>`).join('');
+  document.getElementById('addClItemGasNew').value = '';
+  document.getElementById('addClItemSizeNew').value = '';
+  document.getElementById('addClItemCompNew').value = '';
+  document.getElementById('addClItemModal').style.display = 'flex';
+}
+function closeAddClosingItem() { document.getElementById('addClItemModal').style.display = 'none'; }
+
+function saveAddClosingItem() {
+  const gas  = (document.getElementById('addClItemGasNew').value.trim()  || document.getElementById('addClItemGas').value  || '').trim();
+  const size = (document.getElementById('addClItemSizeNew').value.trim() || document.getElementById('addClItemSize').value || '').trim();
+  const comp = (document.getElementById('addClItemCompNew').value.trim() || document.getElementById('addClItemComp').value || '').trim();
+  if (!gas || !size || !comp) { alert('가스 · 규격 · 업체를 모두 입력해주세요.'); return; }
+
+  if (inventory.find(r => r.gas === gas && r.size === size && r.company === comp)) {
+    alert('이미 등록된 품목입니다.\n"재고 0 품목도 표시"를 체크하면 목록에서 확인할 수 있습니다.');
+    return;
+  }
+  inventory.push({ id: uid(), gas, size, company: comp, dinoCode: '', full: 0, empty: 0, liter: null });
+  save(STORE_KEY_INV, inventory);
+  closeAddClosingItem();
+  const chk = document.getElementById('closeIncludeZero');
+  if (chk) chk.checked = true;
+  loadClosingSnapshot();
+  alert(`✅ 품목이 추가되었습니다.\n${gas} · ${size} · ${comp}`);
 }
 
 function fmtDiff(d) {
@@ -5458,10 +6341,24 @@ function saveClosing() {
       if (cy.sysBtl !== 0) { lossSum += diff/cy.sysBtl*100; lossCount++; }
     }
   });
+  // 완제품 실병 차이도 집계에 포함
+  snap.finished.forEach(f => {
+    if (actual[f.key]?.full !== undefined) {
+      const diff = actual[f.key].full - f.sysFull;
+      totalDiff += diff; itemCount++;
+      if (f.sysFull !== 0) { lossSum += diff/f.sysFull*100; lossCount++; }
+    }
+  });
+
+  // 용기번호 불일치 항목 수집 (감사 추적용)
+  const cylMismatch = snap.finished
+    .filter(f => (f.cylCount || 0) !== f.sysFull)
+    .map(f => ({ key: f.key, sysFull: f.sysFull, cylCount: f.cylCount || 0 }));
 
   const entry = {
     id: uid(), date,
     actual, snapshot: snap,
+    cylMismatch,
     totalDiff: +totalDiff.toFixed(2),
     avgLoss: lossCount ? +(lossSum/lossCount).toFixed(2) : 0,
     itemCount,
@@ -5478,7 +6375,10 @@ function saveClosing() {
   }
   save(STORE_KEY_DAYCLOSE, dailyClosing);
   renderClosingHist();
-  alert(`✅ ${date} 일일 마감 저장 완료!\n총 차이: ${entry.totalDiff} / 평균 로스율: ${entry.avgLoss}%`);
+  const warnMsg = cylMismatch.length
+    ? `\n\n⚠️ 용기번호 수량과 전산 재고가 다른 품목 ${cylMismatch.length}건이 있습니다.\n(용기확인 버튼으로 목록을 확인해보세요)`
+    : '';
+  alert(`✅ ${date} 일일 마감 저장 완료!\n총 차이: ${entry.totalDiff} / 평균 로스율: ${entry.avgLoss}%${warnMsg}`);
 }
 
 function renderClosingHist() {
@@ -5720,7 +6620,10 @@ function convertMixName(oldName) {
   if (!oldName || !oldName.startsWith('혼합')) return oldName;
   const m = oldName.match(/\[(.+)\]/);
   if (!m) return oldName;
-  const parts = m[1].split('/').map(s => s.trim());
+  // 0% 성분은 변환 단계에서 제거 (예: "N₂ 0%" → 품명에서 제외)
+  const parts = m[1].split('/').map(s => s.trim())
+    .filter(s => !/^.+?\s+0+(?:\.0+)?%$/.test(s));
+  if (!parts.length) return oldName;
   return parts.map((s, idx) => {
     const isLast = idx === parts.length - 1;
     const m2 = s.match(/^(.+?)\s+(\d+(?:\.\d+)?)%$/);
@@ -5744,9 +6647,14 @@ function migrateMixGasItem(item) {
   if (!item || !item.gas) return false;
   let changed = false;
   if (item.gas.startsWith('혼합')) {
-    item.gas = convertMixName(item.gas); changed = true;
+    // 실제로 값이 바뀐 경우에만 changed 처리.
+    // (기존에는 변환 실패로 같은 값이 돌아와도 changed=true가 되어
+    //  Firebase 저장 → 다른 기기 수신 → 재변환 → 저장 … 무한 반복이 발생했음)
+    const converted = convertMixName(item.gas);
+    if (converted !== item.gas) { item.gas = converted; changed = true; }
   } else if (isMixGas(item.gas)) {
-    const f = stripLastPct(item.gas);
+    let f = stripZeroPct(item.gas);      // 0% 성분 제거
+    f = stripLastPct(f);                 // 마지막(Balance) 성분의 % 제거
     if (f !== item.gas) { item.gas = f; changed = true; }
   }
   // PSG-PH → 47L 규격 변환
@@ -6164,7 +7072,10 @@ function renderRawTiles() {
   // He 타일
   const heVal     = showKg ? heTotalKg : heTotalM3;
   const heUnit    = showKg ? 'kg' : 'm³';
-  const heAlt     = showKg ? `= ${heTotalM3.toFixed(2)} m³` : `= ${heTotalKg.toFixed(2)} kg`;
+  // m³ 는 소수점 1자리, kg 은 2자리로 통일 (자릿수가 길어져 줄이 밀리는 것 방지)
+  const heAlt     = showKg ? `= ${heTotalM3.toFixed(1)} m³` : `= ${heTotalKg.toFixed(2)} kg`;
+  const heValTxt  = heVal.toFixed(showKg ? 2 : 1);
+  const heFontPx  = heValTxt.length >= 10 ? 17 : heValTxt.length >= 8 ? 19 : 22;
   const hePct     = Math.min(100, Math.round(heTotalKg/300*100));
   const heBar     = hePct>=40?'#39d353':hePct>=15?'#d29922':'#f85149';
 
@@ -6191,15 +7102,15 @@ function renderRawTiles() {
       <span style="font-size:11px;font-weight:700;color:var(--accent);letter-spacing:.06em">He (헬륨)</span>
       <span style="font-size:10px;color:var(--text3)">1kg=6.03m³</span>
     </div>
-    <div style="display:flex;align-items:baseline;gap:5px;margin-bottom:2px">
-      <span style="font-family:var(--mono);font-size:22px;font-weight:700;color:var(--accent)">${heVal.toFixed(showKg?2:4)}</span>
+    <div style="display:flex;align-items:baseline;gap:5px;margin-bottom:2px;flex-wrap:nowrap;white-space:nowrap;overflow:hidden">
+      <span style="font-family:var(--mono);font-size:${heFontPx}px;font-weight:700;color:var(--accent)">${heValTxt}</span>
       <span style="font-size:11px;color:var(--text3)">${heUnit}</span>
       <span style="font-size:11px;color:var(--text3);margin-left:4px">${heAlt}</span>
     </div>
-    <div style="font-size:10px;color:var(--text3);margin-bottom:5px">
-      ISO Tank: <span style="color:var(--accent);font-family:var(--mono)">${showKg?heTankKg.toFixed(2):(heTankKg*HE_KG_TO_M3).toFixed(2)}</span>${heUnit}
+    <div style="font-size:10px;color:var(--text3);margin-bottom:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+      ISO Tank: <span style="color:var(--accent);font-family:var(--mono)">${showKg?heTankKg.toFixed(2):(heTankKg*HE_KG_TO_M3).toFixed(1)}</span>${heUnit}
       &nbsp;|&nbsp;
-      카트리지: <span style="color:var(--teal);font-family:var(--mono)">${showKg?heCartKg.toFixed(2):heCartM3.toFixed(3)}</span>${heUnit}
+      카트리지: <span style="color:var(--teal);font-family:var(--mono)">${showKg?heCartKg.toFixed(2):heCartM3.toFixed(1)}</span>${heUnit}
     </div>
     <div style="height:4px;background:var(--bg4);border-radius:2px">
       <div style="height:4px;width:${hePct}%;background:${heBar};border-radius:2px;transition:width .3s"></div>
@@ -6239,10 +7150,10 @@ function renderRawTiles() {
         <span style="font-size:11px;font-weight:700;color:${g.color};letter-spacing:.06em">${g.label}</span>
         <span style="font-size:10px;color:var(--text3)">${g.sub}</span>
       </div>
-      <div style="display:flex;align-items:baseline;gap:6px;margin-bottom:5px">
-        <span style="font-family:var(--mono);font-size:22px;font-weight:700;color:${g.color}">${kg.toFixed(2)}</span>
+      <div style="display:flex;align-items:baseline;gap:6px;margin-bottom:5px;flex-wrap:nowrap;white-space:nowrap;overflow:hidden">
+        <span style="font-family:var(--mono);font-size:${kg.toFixed(2).length >= 10 ? 17 : kg.toFixed(2).length >= 8 ? 19 : 22}px;font-weight:700;color:${g.color}">${kg.toFixed(2)}</span>
         <span style="font-size:11px;color:var(--text3)">kg</span>
-        <span style="font-size:11px;color:var(--text3);margin-left:4px">= ${m3.toFixed(2)} m³</span>
+        <span style="font-size:11px;color:var(--text3);margin-left:4px">= ${m3.toFixed(1)} m³</span>
       </div>
       <div style="height:4px;background:var(--bg4);border-radius:2px">
         <div style="height:4px;width:${pct}%;background:${barColor};border-radius:2px;transition:width .3s"></div>
@@ -6794,6 +7705,144 @@ function deleteCartridge(id) {
   populateCartSelects();
 }
 
+// ══════ 카트리지 번호 깨짐 감지 · 정리 ══════
+// 정상 형식: 90다3602 (숫자2~3 + 한글1 + 숫자4). 그 외는 엑셀 가져오기 오류로 조각난 항목.
+const CART_NO_PATTERN = /^\d{2,3}[가-힣]\d{4}$/;
+
+function isValidCartNo(no) {
+  return CART_NO_PATTERN.test(String(no || '').replace(/\s/g, ''));
+}
+
+function getBrokenCartridges() {
+  return cartridges.filter(c => !isValidCartNo(c.no));
+}
+
+// 카트리지 페이지 진입/갱신 시 깨진 항목 있으면 배너 표시
+function refreshCartFixBanner() {
+  const banner = document.getElementById('cartFixBanner');
+  if (!banner) return;
+  const broken = getBrokenCartridges();
+  if (!broken.length) { banner.style.display = 'none'; return; }
+  banner.style.display = 'block';
+  const cnt = document.getElementById('cartFixCount');
+  if (cnt) cnt.textContent = ` — ${broken.length}대`;
+}
+
+function openCartFix() {
+  const broken = getBrokenCartridges();
+  if (!broken.length) { alert('정리할 항목이 없습니다.'); return; }
+
+  // 충전·출고 이력이 걸려 있는 항목 확인 (삭제 시 주의 안내용)
+  const usedNos = new Set((cartLogs || []).map(l => l.cartNo).filter(Boolean));
+  const withLogs = broken.filter(c => usedNos.has(c.no));
+  const warnEl = document.getElementById('cartFixLogWarn');
+  if (warnEl) {
+    if (withLogs.length) {
+      warnEl.style.display = 'block';
+      warnEl.innerHTML = `⚠️ 아래 ${withLogs.length}대는 충전·출고 이력이 연결되어 있습니다. 삭제보다 <strong>번호 수정</strong>을 권합니다: ` +
+        withLogs.map(c => `<code>${c.no}</code>`).join(', ');
+    } else {
+      warnEl.style.display = 'none';
+    }
+  }
+
+  document.getElementById('cartFixBody').innerHTML = broken.map(c => {
+    const hasLog = usedNos.has(c.no);
+    return `<tr>
+      <td><input type="checkbox" class="cart-fix-chk" value="${c.id}" style="width:15px;height:15px;accent-color:var(--danger)"></td>
+      <td><span style="font-family:var(--mono);color:var(--danger);font-weight:700">${c.no || '(비어있음)'}</span></td>
+      <td><input type="text" class="cart-fix-no" data-id="${c.id}" placeholder="예: 90다3602"
+            style="width:100%;font-family:var(--mono);font-size:12px"></td>
+      <td class="num" style="color:var(--text3)">${c.vol ?? '—'}</td>
+      <td class="num" style="color:var(--text3)">${c.cylCount ?? '—'}</td>
+      <td style="font-size:11px;color:var(--text3)">${fmtYearMonth(c.fillDate) || '—'}</td>
+      <td>${hasLog ? '<span style="font-size:11px;color:var(--warn);font-weight:700">이력 있음</span>' : '<span style="font-size:11px;color:var(--text3)">—</span>'}</td>
+    </tr>`;
+  }).join('');
+
+  const allChk = document.getElementById('cartFixAll');
+  if (allChk) allChk.checked = false;
+  document.getElementById('cartFixModal').style.display = 'flex';
+}
+
+function closeCartFix() { document.getElementById('cartFixModal').style.display = 'none'; }
+
+function toggleCartFixAll(el) {
+  document.querySelectorAll('.cart-fix-chk').forEach(c => { c.checked = el.checked; });
+}
+
+// 입력한 번호로 수정 저장
+function saveCartFixNumbers() {
+  const inputs = [...document.querySelectorAll('.cart-fix-no')].filter(i => i.value.trim());
+  if (!inputs.length) { alert('고칠 번호를 입력해주세요.'); return; }
+
+  const errs = [];
+  const plan = [];
+  inputs.forEach(inp => {
+    const id = inp.dataset.id;
+    const newNo = inp.value.trim().replace(/\s/g, '');
+    const c = cartridges.find(x => x.id === id);
+    if (!c) return;
+    if (!isValidCartNo(newNo)) { errs.push(`${newNo} — 형식 오류 (예: 90다3602)`); return; }
+    const dup = cartridges.find(x => x.id !== id && String(x.no).replace(/\s/g,'') === newNo);
+    if (dup) { errs.push(`${newNo} — 이미 등록된 번호`); return; }
+    if (plan.some(p => p.newNo === newNo)) { errs.push(`${newNo} — 입력값끼리 중복`); return; }
+    plan.push({ id, oldNo: c.no, newNo });
+  });
+
+  if (errs.length) { alert('아래 항목을 확인해주세요.\n\n' + errs.join('\n')); return; }
+  if (!plan.length) { alert('저장할 항목이 없습니다.'); return; }
+
+  const msg = plan.map(p => `  ${p.oldNo || '(비어있음)'}  →  ${p.newNo}`).join('\n');
+  if (!confirm(`아래와 같이 번호를 수정합니다.\n\n${msg}\n\n계속하시겠습니까?`)) return;
+
+  let logFixed = 0;
+  plan.forEach(p => {
+    const c = cartridges.find(x => x.id === p.id);
+    if (!c) return;
+    // 연결된 충전·출고 이력의 번호도 함께 갱신 (이력 끊김 방지)
+    (cartLogs || []).forEach(l => { if (l.cartNo === p.oldNo) { l.cartNo = p.newNo; logFixed++; } });
+    c.no = p.newNo;
+  });
+
+  save(STORE_KEY_CART, cartridges);
+  if (logFixed) save(STORE_KEY_CART_LOG, cartLogs);
+
+  closeCartFix();
+  renderCartStock();
+  populateCartSelects();
+  refreshCartFixBanner();
+  alert(`✅ ${plan.length}건 수정 완료${logFixed ? `\n연결된 이력 ${logFixed}건도 함께 갱신했습니다.` : ''}`);
+}
+
+// 선택 항목 삭제
+function deleteCartFixSelected() {
+  const ids = [...document.querySelectorAll('.cart-fix-chk:checked')].map(c => c.value);
+  if (!ids.length) { alert('삭제할 항목을 선택해주세요.'); return; }
+
+  const targets = cartridges.filter(c => ids.includes(c.id));
+  const usedNos = new Set((cartLogs || []).map(l => l.cartNo).filter(Boolean));
+  const withLogs = targets.filter(c => usedNos.has(c.no));
+
+  let msg = `선택한 ${targets.length}대를 삭제합니다.\n\n` +
+            targets.map(c => `  · ${c.no || '(비어있음)'}`).join('\n');
+  if (withLogs.length) {
+    msg += `\n\n⚠️ 이 중 ${withLogs.length}대는 충전·출고 이력이 연결되어 있습니다.\n` +
+           `삭제해도 이력 자체는 남지만 카트리지 정보와의 연결이 끊깁니다.`;
+  }
+  msg += `\n\n백업은 받으셨나요? 계속하시겠습니까?`;
+  if (!confirm(msg)) return;
+
+  cartridges = cartridges.filter(c => !ids.includes(c.id));
+  save(STORE_KEY_CART, cartridges);
+
+  closeCartFix();
+  renderCartStock();
+  populateCartSelects();
+  refreshCartFixBanner();
+  alert(`✅ ${targets.length}대를 삭제했습니다.\n\n엑셀을 다시 가져오시면 올바른 번호로 등록됩니다.`);
+}
+
 function renderCartStock() {
   const tbody = document.getElementById('cartStockBody');
   if (!cartridges.length) {
@@ -6971,7 +8020,7 @@ function saveCartFill() {
 
   ['t1','p1','t2','p2','cartMemo'].forEach(i => document.getElementById(i).value='');
   document.getElementById('cartResult').style.display='none';
-  renderCartStock(); renderRawTiles(); populateCartSelects(); renderTodayCartLog();
+  renderCartStock(); renderRawTiles(); populateCartSelects(); renderTodayCartLog(); initCartHistFilters(); if (cartHistSearched) renderCartHist();
 
   // 성적서 발행 여부 확인
   const wantCert = confirm(
@@ -7097,7 +8146,7 @@ function saveCartOut() {
   document.getElementById('outP').value='';
   document.getElementById('cartOutMemo').value='';
   document.getElementById('cartOutResult').style.display='none';
-  renderCartStock(); populateCartSelects(); renderTodayCartLog();
+  renderCartStock(); populateCartSelects(); renderTodayCartLog(); initCartHistFilters(); if (cartHistSearched) renderCartHist();
   alert(`✅ 출고 처리 완료!\n${cart.no}: 출고 시 ${m3.toFixed(4)} m³`);
 }
 
@@ -7144,8 +8193,139 @@ function saveCartRet() {
   document.getElementById('retP').value='';
   document.getElementById('cartRetMemo').value='';
   document.getElementById('cartRetResult').style.display='none';
-  renderCartStock(); populateCartSelects(); renderTodayCartLog();
+  renderCartStock(); populateCartSelects(); renderTodayCartLog(); initCartHistFilters(); if (cartHistSearched) renderCartHist();
   alert(`✅ 반납 정산 완료!\n${cart.no}: 잔량 ${retM3.toFixed(4)} m³ / 사용량 ${usedM3.toFixed(4)} m³`);
+}
+
+// ══════ 공병 입고 이력 조회 ══════
+function initIncHistFilters() {
+  const fromEl = document.getElementById('incHistFrom');
+  const toEl   = document.getElementById('incHistTo');
+  if (fromEl && !fromEl.value) { const d=new Date(); d.setDate(d.getDate()-6); fromEl.value = d.toISOString().slice(0,10); }
+  if (toEl && !toEl.value) toEl.value = today();
+
+  const incs = logs.filter(l => l.type === 'incoming');
+  const gasSel = document.getElementById('incHistGas');
+  if (gasSel) {
+    const cur = gasSel.value;
+    const gases = [...new Set(incs.map(l=>l.gas).filter(Boolean))].sort();
+    gasSel.innerHTML = '<option value="">전체</option>' + gases.map(g=>`<option value="${g}" ${g===cur?'selected':''}>${g}</option>`).join('');
+  }
+  const compSel = document.getElementById('incHistComp');
+  if (compSel) {
+    const cur = compSel.value;
+    const comps = [...new Set(incs.map(l=>l.company).filter(Boolean))].sort();
+    compSel.innerHTML = '<option value="">전체</option>' + comps.map(c=>`<option value="${c}" ${c===cur?'selected':''}>${c}</option>`).join('');
+  }
+}
+
+function incHistQuick(days) {
+  const d = new Date(); d.setDate(d.getDate() - (days - 1));
+  document.getElementById('incHistFrom').value = d.toISOString().slice(0,10);
+  document.getElementById('incHistTo').value   = today();
+  renderIncHist();
+}
+
+function renderIncHist() {
+  const tbody = document.getElementById('incHistBody');
+  if (!tbody) return;
+  const from = document.getElementById('incHistFrom')?.value || '';
+  const to   = document.getElementById('incHistTo')?.value || '';
+  const gas  = document.getElementById('incHistGas')?.value || '';
+  const comp = document.getElementById('incHistComp')?.value || '';
+  const countEl = document.getElementById('incHistCount');
+
+  const rows = logs.filter(l => l.type === 'incoming')
+    .filter(l => (!from || l.date >= from) && (!to || l.date <= to))
+    .filter(l => (!gas || l.gas === gas))
+    .filter(l => (!comp || l.company === comp))
+    .slice()
+    .sort((a,b) => (b.date + (b.time||'')).localeCompare(a.date + (a.time||'')));
+
+  incHistSearched = true;
+  if (countEl) countEl.textContent = rows.length ? `총 ${rows.length}건 · 공병 ${rows.reduce((s,l)=>s+(l.dEmpty||0),0)}개 입고` : '';
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text3);padding:20px">해당 기간 입고 이력이 없습니다</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(l => `<tr>
+      <td style="font-family:var(--mono);font-size:12px">${l.date}</td>
+      <td>${l.gas}</td>
+      <td style="font-family:var(--mono);font-size:12px">${l.size||''}</td>
+      <td>${l.company||''}</td>
+      <td class="num" style="font-family:var(--mono);color:var(--teal)">+${l.dEmpty||0}</td>
+      <td style="font-size:11px;color:var(--text3)">${l.memo||''}</td>
+    </tr>`).join('');
+}
+
+// ══════ 카트리지 이력 조회 ══════
+function initCartHistFilters() {
+  const fromEl = document.getElementById('cartHistFrom');
+  const toEl   = document.getElementById('cartHistTo');
+  if (fromEl && !fromEl.value) { const d=new Date(); d.setDate(d.getDate()-6); fromEl.value = d.toISOString().slice(0,10); }
+  if (toEl && !toEl.value) toEl.value = today();
+
+  const noSel = document.getElementById('cartHistNo');
+  if (noSel) {
+    const cur = noSel.value;
+    const nos = [...new Set(cartLogs.map(l=>l.cartNo).filter(Boolean))].sort();
+    noSel.innerHTML = '<option value="">전체</option>' + nos.map(n=>`<option value="${n}" ${n===cur?'selected':''}>${n}</option>`).join('');
+  }
+}
+
+function cartHistQuick(days) {
+  const d = new Date(); d.setDate(d.getDate() - (days - 1));
+  document.getElementById('cartHistFrom').value = d.toISOString().slice(0,10);
+  document.getElementById('cartHistTo').value   = today();
+  renderCartHist();
+}
+
+function renderCartHist() {
+  const wrap = document.getElementById('cartHistBody');
+  if (!wrap) return;
+  const from = document.getElementById('cartHistFrom')?.value || '';
+  const to   = document.getElementById('cartHistTo')?.value || '';
+  const type = document.getElementById('cartHistType')?.value || '';
+  const cartNo = document.getElementById('cartHistNo')?.value || '';
+  const countEl = document.getElementById('cartHistCount');
+
+  const rows = cartLogs
+    .filter(l => (!from || l.date >= from) && (!to || l.date <= to))
+    .filter(l => (!type || l.type === type))
+    .filter(l => (!cartNo || l.cartNo === cartNo))
+    .slice()
+    .sort((a,b) => (b.date + (b.time||'')).localeCompare(a.date + (a.time||'')));
+
+  cartHistSearched = true;
+  if (countEl) countEl.textContent = rows.length ? `총 ${rows.length}건` : '';
+  if (!rows.length) {
+    wrap.innerHTML = '<p style="color:var(--text3);font-size:13px;text-align:center;padding:20px 0">해당 기간 카트리지 이력이 없습니다</p>';
+    return;
+  }
+
+  const typeInfo = {
+    fill:   { icon:'⚡', label:'충전', color:'var(--accent)' },
+    out:    { icon:'📤', label:'출고', color:'var(--danger)' },
+    ret:    { icon:'📥', label:'반납', color:'var(--teal)' },
+    raw_in: { icon:'📦', label:'원재료입고', color:'var(--purple)' },
+    inspect:{ icon:'🔍', label:'검사완료', color:'var(--accent2)' },
+  };
+  wrap.innerHTML = rows.map(l => {
+    const ti = typeInfo[l.type] || { icon:'•', label:l.type, color:'var(--text2)' };
+    let detail = '';
+    if (l.type==='fill')    detail = `${l.cartNo} — <strong style="font-family:var(--mono);color:var(--accent)">${l.filledM3} m³</strong> 충전${l.cylUsed?` / 실린더 ${l.cylUsed}개`:''}`;
+    if (l.type==='out')     detail = `${l.cartNo} — 출고 시 <strong style="font-family:var(--mono);color:var(--danger)">${l.m3} m³</strong>${l.company?' → '+l.company:''}`;
+    if (l.type==='ret')     detail = `${l.cartNo} — 잔량 <strong style="font-family:var(--mono);color:var(--teal)">${l.retM3} m³</strong> / 사용 ${l.usedM3} m³`;
+    if (l.type==='raw_in')  detail = `${l.gas} 원재료 <strong style="font-family:var(--mono);color:var(--purple)">+${l.kg||''}${l.btl?l.btl+'병':l.m3?l.m3+'m³':''}</strong>`;
+    if (l.type==='inspect') detail = `${l.cartNo} — 검사완료 <strong style="font-family:var(--mono);color:var(--accent2)">${fmtYearMonth(l.doneDate)}</strong> / 새 충전기한 ${fmtYearMonth(l.newFillDate)} / 차기검사 ${fmtYearMonth(l.newInspectDate)}`;
+    return `<div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--border)">
+      <span style="font-family:var(--mono);font-size:11px;color:var(--text3);min-width:74px">${l.date}</span>
+      <span style="font-size:15px">${ti.icon}</span>
+      <span class="tag" style="background:${ti.color}22;color:${ti.color};min-width:60px;text-align:center">${ti.label}</span>
+      <div style="font-size:12px;flex:1">${detail}</div>
+      <span style="font-family:var(--mono);font-size:11px;color:var(--text3)">${(l.time||'').split(' ')[1]||''}</span>
+    </div>`;
+  }).join('');
 }
 
 function renderTodayCartLog() {
@@ -7203,6 +8383,41 @@ function initOrderPage() {
   document.getElementById('ordItemBody').innerHTML = '';
   addOrdItem();
 
+  initOrderHistFilters();
+  if (ordHistSearched) renderOrderHist();
+}
+
+// 발주 이력 필터 초기화 (기본: 최근 30일 + 발주처 드롭다운)
+function initOrderHistFilters() {
+  const fromEl = document.getElementById('ordHistFrom');
+  const toEl   = document.getElementById('ordHistTo');
+  if (fromEl && !fromEl.value) {
+    const d = new Date(); d.setDate(d.getDate() - 29);
+    fromEl.value = d.toISOString().slice(0,10);
+  }
+  if (toEl && !toEl.value) toEl.value = today();
+
+  const compSel = document.getElementById('ordHistComp');
+  if (compSel) {
+    const cur = compSel.value;
+    const comps = [...new Set(orders.map(o => o.company).filter(Boolean))].sort();
+    compSel.innerHTML = '<option value="">전체</option>' +
+      comps.map(c => `<option value="${c}" ${c === cur ? 'selected' : ''}>${c}</option>`).join('');
+  }
+}
+
+function ordHistQuick(days) {
+  const toEl = document.getElementById('ordHistTo');
+  const fromEl = document.getElementById('ordHistFrom');
+  if (days === 0) {
+    // 전체 — 시작일 비움
+    fromEl.value = '';
+    toEl.value = today();
+  } else {
+    const d = new Date(); d.setDate(d.getDate() - (days - 1));
+    fromEl.value = d.toISOString().slice(0,10);
+    toEl.value = today();
+  }
   renderOrderHist();
 }
 
@@ -7376,14 +8591,25 @@ function saveOrder() {
 
 function renderOrderHist() {
   const filter = document.getElementById('ordHistFilter')?.value || '';
+  const from   = document.getElementById('ordHistFrom')?.value || '';
+  const to     = document.getElementById('ordHistTo')?.value || '';
+  const comp   = document.getElementById('ordHistComp')?.value || '';
   const wrap   = document.getElementById('ordHistBody');
+  const countEl = document.getElementById('ordHistCount');
 
   const filtered = orders
     .filter(o => !filter || o.status === filter)
+    .filter(o => !from || (o.date || '') >= from)
+    .filter(o => !to   || (o.date || '') <= to)
+    .filter(o => !comp || o.company === comp)
     .slice()
     .sort((a,b) => (b.date||b.createdAt||'').localeCompare(a.date||a.createdAt||''));
+
+  ordHistSearched = true;
+  if (countEl) countEl.textContent = filtered.length ? `총 ${filtered.length}건` : '';
+
   if (!filtered.length) {
-    wrap.innerHTML = '<p style="color:var(--text3);font-size:13px;text-align:center;padding:20px 0">저장된 발주가 없습니다</p>';
+    wrap.innerHTML = '<p style="color:var(--text3);font-size:13px;text-align:center;padding:20px 0">조건에 맞는 발주 이력이 없습니다</p>';
     return;
   }
 
@@ -7435,7 +8661,8 @@ function deleteOrder(id) {
   if (!confirm('이 발주를 삭제하시겠습니까?')) return;
   orders = orders.filter(o => o.id !== id);
   save(STORE_KEY_ORDERS, orders);
-  renderOrderHist();
+  initOrderHistFilters();
+  if (ordHistSearched) renderOrderHist();
 }
 
 // ══════ INCOMING (공병 입고) ══════
@@ -7468,6 +8695,8 @@ function initIncomingPage() {
   document.getElementById('incMixRows').innerHTML = '';
   document.getElementById('incMemo').value = '';
   renderTodayIncomingLog();
+  initIncHistFilters();
+  if (incHistSearched) renderIncHist();
 }
 
 function onIncGasTypeChange() {
@@ -7971,8 +9200,7 @@ function initAnalysisPage() {
   document.getElementById('anGas').innerHTML =
     '<option value="">전체</option>' + gases.map(g=>`<option>${g}</option>`).join('');
 
-  loadAnLots();
-  renderAnHist();
+  // LOT 목록·분석 이력은 조회 버튼으로만 조회
 }
 
 let anOnlyUnset = true; // 기본: 미입력만 보기
@@ -8508,8 +9736,7 @@ function saveAnalysis() {
 
   document.getElementById('anFormCard').style.display = 'none';
   currentAnLog = null;
-  loadAnLots();
-  renderAnHist();
+  // LOT 목록·분석 이력은 조회 버튼으로만 조회
 }
 
 function renderAnHist() {
@@ -8671,6 +9898,20 @@ function downloadCertExcel() {
 // ── 성적서 발행 모달 ──
 let certTargetEntry = null;
 
+// ── 실린더 번호 → 규격 맵 (생산 로그 기준)
+// 같은 LOT에 47L/10L가 섞여 생산된 경우 실린더별 규격을 알아내기 위함
+function getCylSizeMap(lotNo) {
+  const map = {};
+  if (!lotNo) return map;
+  logs.filter(l => l.type === 'produce' && l.lotNo === lotNo).forEach(l => {
+    (l.containers || []).forEach(c => {
+      const no = typeof c === 'string' ? c : (c.container || c);
+      if (no) map[no] = l.size;
+    });
+  });
+  return map;
+}
+
 // ── 출고 이력에서 성적서 발행
 function openCertFromShipLog(logId) {
   const log = logs.find(l => l.id === logId);
@@ -8680,8 +9921,10 @@ function openCertFromShipLog(logId) {
   const entry = analysisData.find(a => a.lotNo === log.lotNo);
   if (!entry) { alert(`LOT ${log.lotNo}의 분석 데이터를 찾을 수 없습니다.`); return; }
 
-  // 해당 출고건의 업체와 실린더로 미리 세팅 — entry 복사해서 수정
-  const shipEntry = { ...entry, company: log.company || entry.company };
+  // 해당 출고건의 업체·규격·실린더로 미리 세팅 — entry 복사해서 수정
+  // 출고 로그의 size가 실제 출고된 규격이므로 이를 성적서 규격으로 사용
+  const shipEntry = { ...entry, company: log.company || entry.company,
+                      size: log.size || entry.size, _forceSize: log.size || null };
   // 출고 시 선택한 실린더 번호만 사용
   if (log.cylinders && log.cylinders.length) {
     shipEntry.containers = log.cylinders.map(no => ({ container: no }));
@@ -8749,7 +9992,7 @@ function openCertModal(entry) {
       <span><span style="color:var(--text3)">LOT</span> <strong style="font-family:var(--mono);color:var(--accent)">${entry.lotNo}</strong></span>
       <span><span style="color:var(--text3)">가스</span> <strong>${entry.gas}</strong></span>
       <span><span style="color:var(--text3)">Product</span> <strong style="color:var(--teal)">${productName}</strong></span>
-      <span><span style="color:var(--text3)">규격</span> <strong style="font-family:var(--mono)">${entry.size}</strong></span>
+      <span><span style="color:var(--text3)">규격</span> <strong style="font-family:var(--mono);color:var(--accent2)" id="certModalSize">${entry.size}</strong></span>
       <span><span style="color:var(--text3)">생산일</span> <strong style="font-family:var(--mono)">${entry.date}</strong></span>
       <span><span style="color:var(--text3)">분석일</span> <strong style="font-family:var(--mono)">${entry.analysisDate||'—'}</strong></span>
     </div>`;
@@ -8774,16 +10017,28 @@ function openCertModal(entry) {
   // 실린더 목록 — containers는 문자열 배열 또는 {container} 객체 배열 모두 처리
   const rawContainers = entry.containers || [];
   const cylinders = rawContainers.map(c => typeof c === 'string' ? c : c.container).filter(Boolean);
+
+  // ── 실린더별 규격 맵 (생산 로그 기준) — 47L/10L 동시 생산 LOT 구분용
+  const cylSizeMap = getCylSizeMap(entry.lotNo);
+  // 출고 이력에서 열린 경우 entry._forceSize가 있으면 전부 그 규격으로 간주
+  const cylSizeOf = no => entry._forceSize || cylSizeMap[no] || entry.size || '';
+  const distinctSizes = [...new Set(cylinders.map(cylSizeOf).filter(Boolean))];
+  const isMixedSizeLot = distinctSizes.length > 1;
+
   const cylList = document.getElementById('certCylList');
   if (!cylinders.length) {
     cylList.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:8px;grid-column:span 2">용기번호 정보 없음</div>';
   } else {
-    cylList.innerHTML = cylinders.map(no => `
+    cylList.innerHTML = cylinders.map(no => {
+      const sz = cylSizeOf(no);
+      const badge = isMixedSizeLot ? `<span style="margin-left:auto;font-size:10px;font-family:var(--mono);color:var(--warn);background:rgba(210,153,34,.15);padding:1px 6px;border-radius:4px">${sz}</span>` : '';
+      return `
       <label style="display:flex;align-items:center;gap:6px;padding:5px 8px;background:var(--bg2);border-radius:6px;cursor:pointer;font-size:12px">
-        <input type="checkbox" class="cert-cyl-chk" value="${no}" checked
+        <input type="checkbox" class="cert-cyl-chk" value="${no}" data-size="${sz}" checked
           style="width:14px;height:14px;accent-color:var(--accent)" onchange="updateCertSelCount()">
-        <span style="font-family:var(--mono)">${no}</span>
-      </label>`).join('');
+        <span style="font-family:var(--mono)">${no}</span>${badge}
+      </label>`;
+    }).join('');
   }
 
   updateCertSelCount();
@@ -8836,11 +10091,44 @@ function certSelectAll(checked) {
   updateCertSelCount();
 }
 
+let certResolvedSize = null; // 선택된 실린더들의 확정 규격
+
 function updateCertSelCount() {
   const total    = document.querySelectorAll('.cert-cyl-chk').length;
-  const selected = document.querySelectorAll('.cert-cyl-chk:checked').length;
+  const checked  = [...document.querySelectorAll('.cert-cyl-chk:checked')];
   const el = document.getElementById('certSelCount');
-  if (el) el.textContent = total > 0 ? `${selected} / ${total}개 선택` : '';
+  if (el) el.textContent = total > 0 ? `${checked.length} / ${total}개 선택` : '';
+
+  // ── 규격 혼합 검사 ──
+  const warnEl = document.getElementById('certSizeWarn');
+  const dlBtn  = document.getElementById('certDownloadBtn');
+  const sizeEl = document.getElementById('certModalSize');
+  const sizeCount = {};
+  checked.forEach(c => { const s = c.dataset.size || ''; if (s) sizeCount[s] = (sizeCount[s]||0) + 1; });
+  const sizes = Object.keys(sizeCount);
+
+  if (sizes.length > 1) {
+    // 규격이 섞임 → 경고 + 발행 차단
+    certResolvedSize = null;
+    if (warnEl) {
+      warnEl.style.display = 'block';
+      warnEl.innerHTML = `⚠️ <strong>용기 규격이 다릅니다</strong> — ` +
+        sizes.map(s => `${s} ${sizeCount[s]}병`).join(' · ') +
+        `<br><span style="font-weight:400">같은 규격끼리만 성적서를 발행할 수 있습니다. 한 규격만 선택해주세요.</span>`;
+    }
+    if (dlBtn) { dlBtn.disabled = true; dlBtn.style.opacity = '.4'; dlBtn.style.cursor = 'not-allowed'; }
+    const pdfBtnA = document.getElementById('certPdfBtn');
+    if (pdfBtnA) { pdfBtnA.disabled = true; pdfBtnA.style.opacity = '.4'; pdfBtnA.style.cursor = 'not-allowed'; }
+    if (sizeEl) { sizeEl.textContent = '⚠️ 혼합'; sizeEl.style.color = 'var(--danger)'; }
+  } else {
+    // 단일 규격 (또는 선택 없음) → 규격 자동 전환
+    certResolvedSize = sizes[0] || (certTargetEntry?.size ?? null);
+    if (warnEl) warnEl.style.display = 'none';
+    if (dlBtn) { dlBtn.disabled = false; dlBtn.style.opacity = '1'; dlBtn.style.cursor = 'pointer'; }
+    const pdfBtnB = document.getElementById('certPdfBtn');
+    if (pdfBtnB) { pdfBtnB.disabled = false; pdfBtnB.style.opacity = '1'; pdfBtnB.style.cursor = 'pointer'; }
+    if (sizeEl && certResolvedSize) { sizeEl.textContent = certResolvedSize; sizeEl.style.color = 'var(--accent2)'; }
+  }
 }
 
 function confirmCertDownload() {
@@ -8848,15 +10136,388 @@ function confirmCertDownload() {
   const comp = document.getElementById('certCompSel').value;
   if (!comp) { alert('납품 업체를 선택해주세요.'); return; }
 
+  // ── 규격 혼합 최종 방어 ──
+  const chkSizes = [...new Set([...document.querySelectorAll('.cert-cyl-chk:checked')].map(c => c.dataset.size).filter(Boolean))];
+  if (chkSizes.length > 1) {
+    alert('⚠️ 용기 규격이 다릅니다.\n같은 규격의 실린더끼리만 선택 후 발행해주세요.');
+    return;
+  }
+  if (![...document.querySelectorAll('.cert-cyl-chk:checked')].length) {
+    alert('실린더를 1개 이상 선택해주세요.');
+    return;
+  }
+
   const issueDate   = document.getElementById('certIssueDate').value;
   const valveType   = document.getElementById('certValveType').value;
   const fillPressure = document.getElementById('certFillPressure').value;
   const selectedCyls = [...document.querySelectorAll('.cert-cyl-chk:checked')].map(c => c.value);
 
-  generateCertExcel(certTargetEntry, comp, issueDate, selectedCyls, valveType, fillPressure);
+  // 선택된 실린더 규격으로 발행 (47L/10L 혼합 LOT에서 규격별 발행 지원)
+  const issueEntry = { ...certTargetEntry, size: certResolvedSize || certTargetEntry.size };
+  generateCertExcel(issueEntry, comp, issueDate, selectedCyls, valveType, fillPressure);
   closeCertModal();
 }
 
+
+// ═══════════ 업체·출고일 기준 성적서 일괄 발행 ═══════════
+function openBatchCert(presetComp, presetDate) {
+  // 출고 이력에 등장하는 업체 목록
+  const shipComps = [...new Set(logs.filter(l => l.type === 'ship' && l.lotNo).map(l => l.company).filter(Boolean))].sort();
+  const compSel = document.getElementById('batchCertComp');
+  compSel.innerHTML = '<option value="">업체 선택</option>' +
+    shipComps.map(c => `<option value="${c}" ${c === presetComp ? 'selected' : ''}>${c}</option>`).join('');
+
+  document.getElementById('batchCertDate').value      = presetDate || today();
+  document.getElementById('batchCertIssueDate').value = presetDate || today();
+  document.getElementById('batchCertValve').value     = 'W22 - # -RH';
+  document.getElementById('batchCertStatus').textContent = '';
+
+  document.getElementById('batchCertModal').style.display = 'flex';
+  batchCertSearch();
+}
+
+function closeBatchCert() {
+  document.getElementById('batchCertModal').style.display = 'none';
+}
+
+function batchCertSearch() {
+  const comp = document.getElementById('batchCertComp').value;
+  const date = document.getElementById('batchCertDate').value;
+  const listEl = document.getElementById('batchCertList');
+  // 발행일을 출고일과 동기화
+  if (date) document.getElementById('batchCertIssueDate').value = date;
+
+  if (!comp || !date) {
+    listEl.innerHTML = '<div style="color:var(--text3);text-align:center;padding:16px">업체와 출고일을 선택하세요</div>';
+    return;
+  }
+
+  const shipLogs = logs.filter(l => l.type === 'ship' && l.lotNo && l.company === comp && l.date === date);
+  if (!shipLogs.length) {
+    listEl.innerHTML = `<div style="color:var(--text3);text-align:center;padding:16px">${date} · ${comp} 출고 이력(LOT 포함)이 없습니다</div>`;
+    return;
+  }
+
+  listEl.innerHTML = shipLogs.map(l => {
+    const entry = analysisData.find(a => a.lotNo === l.lotNo);
+    const hasAn = !!entry;
+    const cylCnt = (l.cylinders || []).length;
+    return `
+      <label style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:var(--bg2);border-radius:6px;margin-bottom:6px;cursor:${hasAn ? 'pointer' : 'not-allowed'};opacity:${hasAn ? 1 : .5}">
+        <input type="checkbox" class="batch-cert-chk" value="${l.id}" ${hasAn ? 'checked' : 'disabled'}
+          style="width:15px;height:15px;accent-color:var(--accent)">
+        <span style="font-family:var(--mono);font-weight:700;color:var(--accent2);min-width:150px">${l.lotNo}</span>
+        <span style="flex:1">${l.gas}</span>
+        <span style="font-family:var(--mono);color:var(--text2)">${l.size}</span>
+        <span style="font-family:var(--mono);color:var(--text3)">${cylCnt}병</span>
+        <span style="font-size:11px;color:${hasAn ? 'var(--accent)' : 'var(--warn)'}">${hasAn ? '✓ 분석완료' : '분석 미입력'}</span>
+      </label>`;
+  }).join('');
+}
+
+async function downloadBatchCerts() {
+  const comp      = document.getElementById('batchCertComp').value;
+  const shipDate  = document.getElementById('batchCertDate').value;
+  const issueDate = document.getElementById('batchCertIssueDate').value || shipDate;
+  const valveType = document.getElementById('batchCertValve').value || 'W22 - # -RH';
+  const statusEl  = document.getElementById('batchCertStatus');
+  const dlBtn     = document.getElementById('batchCertDlBtn');
+
+  if (!comp || !shipDate) { alert('업체와 출고일을 선택해주세요.'); return; }
+  const selIds = [...document.querySelectorAll('.batch-cert-chk:checked')].map(c => c.value);
+  if (!selIds.length) { alert('발행할 출고건을 1개 이상 선택해주세요.'); return; }
+  if (typeof JSZip === 'undefined') { alert('JSZip 라이브러리가 로드되지 않았습니다.'); return; }
+
+  dlBtn.disabled = true; dlBtn.style.opacity = '.5';
+  const outZip = new JSZip();
+  const usedNames = new Set();
+  let ok = 0, fail = 0;
+
+  for (let i = 0; i < selIds.length; i++) {
+    const log = logs.find(l => l.id === selIds[i]);
+    if (!log) { fail++; continue; }
+    const entry = analysisData.find(a => a.lotNo === log.lotNo);
+    if (!entry) { fail++; continue; }
+
+    statusEl.textContent = `⏳ 생성 중... (${i + 1}/${selIds.length}) ${log.lotNo}`;
+
+    // 출고건 기준 entry 구성: 업체·규격·실린더를 출고 로그 그대로 사용
+    const shipEntry = { ...entry, company: comp, size: log.size || entry.size };
+    const cyls = (log.cylinders || []).filter(Boolean);
+    shipEntry.containers = cyls.map(no => ({ container: no }));
+
+    // Filling Pressure: 가스별 자동 (Air는 110, 혼합 110, 순수 120)
+    const isAir = shipEntry.gas.toLowerCase().includes('air') || shipEntry.gas.startsWith('Air');
+    const fp = (isMixGas(shipEntry.gas) || isAir) ? 110 : 120;
+
+    try {
+      const result = await generateCertExcel(shipEntry, comp, issueDate, cyls, valveType, fp, { returnBlob: true });
+      if (result && result.blob) {
+        // 파일명 중복 방지
+        let fname = result.fileName, n = 2;
+        while (usedNames.has(fname)) fname = result.fileName.replace(/\.xlsx$/, `_${n++}.xlsx`);
+        usedNames.add(fname);
+        outZip.file(fname, result.blob);
+        ok++;
+      } else fail++;
+    } catch (e) {
+      console.error('일괄 발행 실패:', log.lotNo, e);
+      fail++;
+    }
+  }
+
+  if (!ok) {
+    statusEl.textContent = '❌ 생성된 성적서가 없습니다.';
+    dlBtn.disabled = false; dlBtn.style.opacity = '1';
+    return;
+  }
+
+  statusEl.textContent = '⏳ ZIP 파일 압축 중...';
+  const zipBlob = await outZip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
+  const zipName = `성적서일괄_${comp}_${shipDate}.zip`;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(zipBlob);
+  a.download = zipName;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); document.body.removeChild(a); }, 1000);
+
+  statusEl.textContent = `✅ 완료 — 성공 ${ok}건${fail ? ` · 실패 ${fail}건 (분석 미입력 등)` : ''} → ${zipName}`;
+  dlBtn.disabled = false; dlBtn.style.opacity = '1';
+}
+
+
+// ══════════════════════════════════════════════════════════════
+//  성적서 PDF 발행 (브라우저 인쇄 → "PDF로 저장")
+//  회사 PC에 별도 프로그램 설치 없이 PDF 생성 가능.
+//  레이아웃은 내장 엑셀 성적서 양식과 동일하게 구성.
+// ══════════════════════════════════════════════════════════════
+const CERT_LOGO_B64 = 'data:image/png;base64,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';
+
+// 성적서 1장 분량 HTML 생성
+function buildCertPageHTML(entry, company, issueDate, selectedCyls, valveType, fillPressure) {
+  const isAir = entry.gas.toLowerCase().includes('air') || entry.gas.startsWith('Air');
+  const isMix = (typeof isMixGas === 'function' && isMixGas(entry.gas)) || isAir;
+  const fp    = fillPressure != null ? fillPressure : (isMix && !isAir ? 110 : 120);
+  const product = (typeof gasToProductName === 'function') ? gasToProductName(entry.gas) : entry.gas;
+
+  // Analysis No. — PS - P YYMMDD - 1
+  const anDateStr   = entry.analysisDate || entry.date || today();
+  const anDateShort = anDateStr.replace(/-/g, '').slice(2);
+
+  // 유효기한 — 분석일 + N개월 - 1일
+  let expire = entry.expireDate || '';
+  if (entry.analysisDate) {
+    const ad = new Date(entry.analysisDate);
+    if (!isNaN(ad.getTime())) {
+      ad.setMonth(ad.getMonth() + (entry.expireMonths || 12));
+      ad.setDate(ad.getDate() - 1);
+      expire = ad.toISOString().slice(0, 10);
+    }
+  }
+
+  // Valve Type — "W22 - 14 - RH" 형태를 3조각으로
+  const vt = String(valveType || 'W22 - # -RH');
+
+  // 분석 결과 행
+  const items = (entry.items || []).filter(it => it && it.name);
+  // 단위는 숫자 바로 뒤에 붙인다. "1.0 미만" + ppm → "1.0 ppm 미만" (양식과 동일한 순서)
+  const withUnit = (v, unit) => {
+    if (v == null || v === '') return '';
+    const s = String(v).trim();
+    if (!unit) return s;
+    const m = s.match(/^(.*?)\s*(미만|이상|이하|초과)$/);
+    return m ? `${m[1].trim()} ${unit} ${m[2]}` : `${s} ${unit}`;
+  };
+  const rowsHtml = items.map(it => {
+    const unit = it.unit || '';
+    return `<tr><td class="c b">${it.name}</td><td class="c b">${withUnit(it.spec, unit)}</td><td class="c b">${withUnit(it.value, unit)}</td><td></td></tr>`;
+  }).join('');
+
+  // 실린더 번호 — 5열 × 최대 10행
+  const cyls = selectedCyls || [];
+  let cylHtml = '';
+  for (let r = 0; r < 10; r++) {
+    const slice = cyls.slice(r * 5, r * 5 + 5);
+    if (!slice.length) break;
+    cylHtml += '<tr>' + Array.from({length:5}, (_, i) =>
+      `<td class="cyl">${slice[i] || ''}</td>`).join('') + '</tr>';
+  }
+
+  return `
+<div class="cert">
+  <div class="topbar"><span class="tb-red"></span><span class="tb-green"></span><span class="tb-url">w w w . p s g a s . c o m</span></div>
+  <div class="addr">◎본&nbsp;&nbsp;&nbsp;&nbsp;사 : 부 산 시 강 서 구 지사동 1167-2번지&nbsp;&nbsp;TEL : 051-790-0900&nbsp;&nbsp;&nbsp;&nbsp;FAX : 051-790-0999</div>
+  <div class="addr">◎포항공장 : 경 북 포 항 시 남구 철강로 357&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;TEL : 054-278-6749&nbsp;&nbsp;&nbsp;&nbsp;FAX : 054-278-6654</div>
+
+  <div class="title">CERTIFICATE OF ANALYSIS</div>
+
+  <table class="cust">
+    <tr>
+      <td class="lbl">Customer</td><td class="col">:</td>
+      <td class="val">${company || ''}</td>
+      <td class="logo"><img src="${CERT_LOGO_B64}"></td>
+    </tr>
+  </table>
+
+  <table class="info">
+    <tr>
+      <td class="lbl">Product</td><td class="col">:</td><td class="val">${product}</td>
+      <td class="lbl2">Issue Date</td><td class="col">:</td><td class="val">${issueDate || ''}</td>
+    </tr>
+    <tr>
+      <td class="lbl">Cylinder Size</td><td class="col">:</td><td class="val">${parseFloat(entry.size) || 47} L</td>
+      <td class="lbl2">Analysis No.</td><td class="col">:</td><td class="val">PS - P ${anDateShort} - 1</td>
+    </tr>
+    <tr>
+      <td class="lbl">Valve Type</td><td class="col">:</td><td class="val">${vt}</td>
+      <td class="lbl2">Analysis Date</td><td class="col">:</td><td class="val">${entry.analysisDate || ''}</td>
+    </tr>
+    <tr>
+      <td class="lbl">Filling Pressure</td><td class="col">:</td><td class="val">${fp} kg/cm<sup>2</sup> (35℃)</td>
+      <td class="lbl2">Expiration Date</td><td class="col">:</td><td class="val">${expire}</td>
+    </tr>
+    <tr>
+      <td class="lbl">Manufacture Date</td><td class="col">:</td><td class="val">${entry.date || ''}</td>
+      <td class="lbl2"></td><td class="col"></td><td class="val"></td>
+    </tr>
+  </table>
+
+  <div class="sec">Analytical Results</div>
+  <table class="res">
+    <thead><tr><th>Components</th><th>Specifications</th><th>Analytical Results</th><th>Remarks</th></tr></thead>
+    <tbody>${rowsHtml}</tbody>
+  </table>
+
+  <div class="cylno">cylinder NO :</div>
+  <table class="cyltb">${cylHtml}</table>
+
+  <table class="qty"><tr><td class="lbl">수 량</td><td class="col">:</td><td class="val">${cyls.length}</td><td class="unit">본</td></tr></table>
+
+  <table class="sign">
+    <tr>
+      <td class="apv">Reviewed &amp; Approve :</td>
+      <td class="stamp"><img src="${CERT_LOGO_B64}"></td>
+    </tr>
+  </table>
+  <div class="disc">위 분석 결과에 대하여 선전 , 소송 , 기타 법적 요건으로 사용할 수&nbsp;&nbsp;없습니다 .</div>
+  <div class="foot"><span class="f-mid">㈜PSG 포항충전소</span><span class="f-right">A4(210x297mm)</span></div>
+</div>`;
+}
+
+// 인쇄 창 열기 (여러 장이면 페이지 나눔)
+function openCertPrintWindow(pagesHtml, titleText) {
+  const w = window.open('', '_blank');
+  if (!w) { alert('팝업이 차단되었습니다.\n브라우저 주소창의 팝업 차단을 해제해주세요.'); return; }
+  w.document.write(`<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8"><title>${titleText || '성적서'}</title>
+<style>
+  @page { size: A4 portrait; margin: 9mm 1mm; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:'맑은 고딕','Malgun Gothic',sans-serif; color:#000; }
+  .cert { width:208mm; padding:0 6mm; page-break-after:always; }
+  .cert:last-child { page-break-after:auto; }
+  .topbar { position:relative; height:7mm; margin-bottom:1.5mm; }
+  .tb-red { position:absolute; left:0; top:0; width:36%; height:100%; background:#8B0000;
+            clip-path:polygon(0 0, 100% 0, 88% 100%, 0 100%); }
+  .tb-green { position:absolute; left:34%; right:0; top:0; height:100%; background:#2E9E6B;
+              clip-path:polygon(6% 0, 100% 0, 100% 100%, 0 100%); }
+  .tb-url { position:absolute; right:3mm; top:1.2mm; color:#fff; font-size:8pt; letter-spacing:1px; }
+  .addr { font-size:9.5pt; font-weight:700; line-height:1.5; }
+  .title { text-align:center; font-size:19pt; font-weight:800; font-style:italic; margin:7mm 0 6mm; letter-spacing:.5px; }
+  table { border-collapse:collapse; width:100%; }
+  td, th { padding:0; }
+  .cust { margin-bottom:2mm; }
+  .cust .lbl { width:36mm; text-align:center; font-size:11pt; font-weight:800; white-space:nowrap; }
+  .cust .col { width:6mm; text-align:center; font-weight:800; }
+  .cust .val { font-size:10.5pt; font-weight:700; }
+  .cust .logo { width:52mm; text-align:right; }
+  .cust .logo img { width:44mm; }
+  .info { border-top:1.6px solid #000; border-bottom:1.6px solid #000; margin-bottom:3mm; }
+  .info td { padding:1.1mm 0; font-size:10pt; font-weight:800; }
+  .info .lbl  { width:36mm; text-align:center; white-space:nowrap; }
+  .info .lbl2 { width:33mm; text-align:center; white-space:nowrap; }
+  .info .col  { width:6mm; text-align:center; }
+  .info .val  { text-align:center; }
+  .sec { font-size:11pt; font-weight:800; border-bottom:1.6px solid #000; padding-bottom:.8mm; margin-bottom:0; }
+  .res th { font-size:10pt; font-weight:800; text-align:center; padding:1.2mm 0; border-bottom:1.2px solid #000; }
+  .res td { font-size:10pt; text-align:center; padding:1.1mm 0; }
+  .res td.b { font-weight:800; }
+  .res { border-bottom:1.6px solid #000; margin-bottom:2.5mm; }
+  .cylno { font-size:10pt; font-weight:800; margin-bottom:1.5mm; }
+  .cyltb { margin-bottom:2mm; }
+  .cyltb td.cyl { width:20%; text-align:center; font-size:9.5pt; font-weight:700; padding:.7mm 0; }
+  .qty { border-top:1.6px solid #000; border-bottom:1.6px solid #000; margin:3mm 0 0; }
+  .qty td { padding:1.3mm 0; font-size:11pt; font-weight:800; }
+  .qty .lbl { width:34mm; text-align:center; letter-spacing:4px; }
+  .qty .col { width:6mm; text-align:center; }
+  .qty .val { width:14mm; text-align:center; }
+  .sign { margin-top:14mm; }
+  .sign .apv { font-size:11pt; font-weight:800; vertical-align:bottom; }
+  .sign .stamp { width:56mm; text-align:right; }
+  .sign .stamp img { width:48mm; }
+  .disc { font-size:8pt; margin-top:3mm; }
+  .foot { position:relative; margin-top:4mm; font-size:9pt; }
+  .f-mid { display:block; text-align:center; font-weight:600; }
+  .f-right { position:absolute; right:0; top:0; font-weight:800; }
+</style></head><body>${pagesHtml}</body></html>`);
+  w.document.close();
+  // 이미지 로딩 후 인쇄 대화상자
+  w.onload = () => { setTimeout(() => { w.focus(); w.print(); }, 350); };
+  setTimeout(() => { try { if (!w.closed) { w.focus(); w.print(); } } catch(e){} }, 1200);
+}
+
+// ── 개별 발행 (성적서 모달)
+function publishCertPDF() {
+  if (!certTargetEntry) return;
+  const comp = document.getElementById('certCompSel').value;
+  if (!comp) { alert('납품 업체를 선택해주세요.'); return; }
+
+  const chkSizes = [...new Set([...document.querySelectorAll('.cert-cyl-chk:checked')].map(c => c.dataset.size).filter(Boolean))];
+  if (chkSizes.length > 1) { alert('⚠️ 용기 규격이 다릅니다.\n같은 규격의 실린더끼리만 선택 후 발행해주세요.'); return; }
+  const selectedCyls = [...document.querySelectorAll('.cert-cyl-chk:checked')].map(c => c.value);
+  if (!selectedCyls.length) { alert('실린더를 1개 이상 선택해주세요.'); return; }
+
+  const issueDate   = document.getElementById('certIssueDate').value || today();
+  const valveType   = document.getElementById('certValveType').value || 'W22 - # -RH';
+  const fillPressure = parseFloat(document.getElementById('certFillPressure').value) || null;
+
+  const issueEntry = { ...certTargetEntry, size: certResolvedSize || certTargetEntry.size };
+  const html = buildCertPageHTML(issueEntry, comp, issueDate, selectedCyls, valveType, fillPressure);
+  openCertPrintWindow(html, `성적서_${issueEntry.lotNo}_${comp}`);
+  closeCertModal();
+}
+
+// ── 일괄 발행 (업체·출고일 기준) — 여러 장을 한 문서로
+function publishBatchCertPDF() {
+  const comp      = document.getElementById('batchCertComp').value;
+  const shipDate  = document.getElementById('batchCertDate').value;
+  const issueDate = document.getElementById('batchCertIssueDate').value || shipDate;
+  const valveType = document.getElementById('batchCertValve').value || 'W22 - # -RH';
+  const statusEl  = document.getElementById('batchCertStatus');
+
+  if (!comp || !shipDate) { alert('업체와 출고일을 선택해주세요.'); return; }
+  const selIds = [...document.querySelectorAll('.batch-cert-chk:checked')].map(c => c.value);
+  if (!selIds.length) { alert('발행할 출고건을 1개 이상 선택해주세요.'); return; }
+
+  const pages = [];
+  let skipped = 0;
+  selIds.forEach(id => {
+    const log = logs.find(l => l.id === id);
+    if (!log) { skipped++; return; }
+    const entry = analysisData.find(a => a.lotNo === log.lotNo);
+    if (!entry) { skipped++; return; }
+    const shipEntry = { ...entry, company: comp, size: log.size || entry.size };
+    const cyls = (log.cylinders || []).filter(Boolean);
+    const isAir = shipEntry.gas.toLowerCase().includes('air') || shipEntry.gas.startsWith('Air');
+    const fp = ((typeof isMixGas === 'function' && isMixGas(shipEntry.gas)) || isAir) ? 110 : 120;
+    pages.push(buildCertPageHTML(shipEntry, comp, issueDate, cyls, valveType, fp));
+  });
+
+  if (!pages.length) { alert('발행 가능한 성적서가 없습니다. (분석 미입력)'); return; }
+  if (statusEl) statusEl.textContent = `🖨️ ${pages.length}장 인쇄 준비 완료${skipped ? ` · ${skipped}건 제외(분석 미입력)` : ''}`;
+  openCertPrintWindow(pages.join(''), `성적서일괄_${comp}_${shipDate}`);
+}
 
 // ── 성적서 양식 (이미지/병합 완전 보존용 base64)
 const CERT_TPL_PURE = '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';
@@ -8913,7 +10574,7 @@ function svgToDataUrl(svgStr, w, h) {
   });
 }
 
-async function generateCertExcel(entry, company, issueDate, selectedCyls, valveType, fillPressure) {
+async function generateCertExcel(entry, company, issueDate, selectedCyls, valveType, fillPressure, opts = {}) {
   if (typeof JSZip === 'undefined') {
     alert('JSZip 라이브러리가 로드되지 않았습니다. 잠시 후 다시 시도해주세요.');
     return;
@@ -9025,8 +10686,11 @@ async function generateCertExcel(entry, company, issueDate, selectedCyls, valveT
   const NS      = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
   const siEls   = Array.from(ssDom.getElementsByTagNameNS(NS,'si'));
   const ssArr   = siEls.map(si => {
-    const t = si.getElementsByTagNameNS(NS,'t')[0];
-    return t ? t.textContent : '';
+    // 하나의 <si> 안에 <t> 가 여러 개일 수 있음(서식 섞인 문자열) → 전부 이어붙인다
+    const ts = si.getElementsByTagNameNS(NS,'t');
+    let s = '';
+    for (let i = 0; i < ts.length; i++) s += ts[i].textContent;
+    return s;
   });
 
   function addShared(text) {
@@ -9599,7 +11263,11 @@ async function generateCertExcel(entry, company, issueDate, selectedCyls, valveT
   // ── 다운로드 / 자동 저장
   const outBuf = await zip.generateAsync({ type:'arraybuffer', compression:'DEFLATE' });
   const blob   = new Blob([outBuf], { type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-  const fileName = `성적서_${entry.lotNo}_${company}_${issueDate}.xlsx`;
+  const sizeTag = (entry.size || '').replace(/[\\/:*?"<>|·\s]/g, '');
+  const fileName = `성적서_${entry.lotNo}_${sizeTag ? sizeTag + '_' : ''}${company}_${issueDate}.xlsx`;
+
+  // ── 일괄 발행 모드: 다운로드하지 않고 blob 반환
+  if (opts.returnBlob) return { blob, fileName };
 
   // 자동 저장 시도: [root]/[업체]/[날짜]/[파일.xlsx]
   const autoResult = await saveCertToFolder(blob, fileName, company, issueDate);
@@ -11038,9 +12706,15 @@ function handleXlsxUpload(input) {
       const ssFile = zip.file('xl/sharedStrings.xml');
       if (ssFile) {
         const ssXml = await ssFile.async('string');
-        ssArr = [...ssXml.matchAll(/<t(?:\s[^>]*)?>([^<]*)<\/t>/g)].map(m => m[1]
-          .replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>')
-          .replace(/&quot;/g,'"').replace(/&apos;/g,"'"));
+        // 공유문자열은 반드시 <si> 단위로 세야 한다.
+        // 서식이 섞인 셀은 하나의 <si> 안에 <r><t> 조각이 여러 개 들어가는데,
+        // 이전 코드는 <t> 를 전부 개별 항목으로 세어 인덱스가 밀렸고
+        // 그 결과 "90다3602" 가 "90" / "다3602" 로 쪼개져 들어가는 문제가 있었다.
+        const _unesc = s => s.replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>')
+                             .replace(/&quot;/g,'"').replace(/&apos;/g,"'");
+        ssArr = [...ssXml.matchAll(/<si(?:\s[^>]*)?>([\s\S]*?)<\/si>/g)].map(m =>
+          [...m[1].matchAll(/<t(?:\s[^>]*)?>([\s\S]*?)<\/t>/g)].map(t => _unesc(t[1])).join('')
+        );
       }
 
       // 시트 이름 목록
@@ -11147,6 +12821,7 @@ function handleXlsxUpload(input) {
           save(STORE_KEY_CART, cartridges);
           renderCartStock();
           populateCartSelects();
+          refreshCartFixBanner();
         }
       }
 
