@@ -391,6 +391,7 @@ window.addEventListener('gasImsReady', () => {
   const POLL_FALLBACK_SEC = 60;     // 리스너 차단 시 폴백 주기 (60초)
 
   const _restTimestamps = {};
+  const _seeded = {};          // 404 문서를 한 번만 생성하도록 표시
   let _restBusy = false;
 
   async function _restSyncAll(reason) {
@@ -403,7 +404,19 @@ window.addEventListener('gasImsReady', () => {
           const res = await fetch(`${FS_REST_BASE}/${key}?key=${FS_API_KEY}`);
           window._readCount = (window._readCount || 0) + 1;
           if (!res.ok) {
-            if (res.status !== 404) console.warn('[동기화 읽기 실패]', key, res.status);
+            if (res.status === 404) {
+              // 서버에 아직 문서가 없는 키 — 이 PC의 데이터를 한 번 올려 문서를 만든다.
+              // (그래야 다른 기기와 동기화되고, 콘솔의 404 로그도 사라진다)
+              if (!_seeded[key]) {
+                _seeded[key] = true;
+                try {
+                  const localRaw = localStorage.getItem(key);
+                  if (localRaw != null) await window.fsSaveREST(key, JSON.parse(localRaw));
+                } catch(e) {}
+              }
+            } else {
+              console.warn('[동기화 읽기 실패]', key, res.status);
+            }
             continue;
           }
           const docJson = await res.json();
