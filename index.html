@@ -169,16 +169,56 @@ const db    = initializeFirestore(fbApp, {
 const FS_COL = 'gasims';
 
 // ── Firebase save: 키 → Firestore 문서로 저장 (source로 자기 업데이트 구분)
+// 키별 저장 확정 상태 — 서버 저장이 확인되지 않은 키는 동기화가 덮어쓰지 못하게 막는다
+window._pendingSave = window._pendingSave || {};
+
 window.fsSave = async function(key, val) {
-  // REST로도 항상 저장 (SDK 차단 환경 대비) — fetch는 작동 확인됨
-  window.fsSaveREST(key, val);
+  // 서버 저장이 확인될 때까지 "미확정" 표시 → 이 동안은 폴링/리스너가 로컬을 덮어쓰지 않음
+  window._pendingSave[key] = true;
+
+  // ⚠️ Firestore 문서 크기 한도(1 MiB) 사전 검사
+  //    초과하면 서버가 400으로 거부하므로, 미리 감지해 명확히 알린다.
+  try {
+    const est = window.fsEstimateSize(val);
+    window._docSizes = window._docSizes || {};
+    window._docSizes[key] = est;
+    if (est > window.FS_DOC_LIMIT) {
+      console.error('[저장 불가] 문서 크기 한도 초과', key, est, '/', window.FS_DOC_LIMIT);
+      if (window.showSaveFailure) {
+        window.showSaveFailure(key,
+          `데이터 용량 한도 초과 (${(est/1048576).toFixed(2)} MB / 1.00 MB)`,
+          '관리자 → 이력 아카이브로 오래된 기록을 정리하면 다시 저장됩니다.');
+      }
+      return false;   // _pendingSave 유지 → 로컬 데이터는 보호됨
+    }
+    if (est > window.FS_DOC_LIMIT * 0.85) {
+      console.warn('[경고] 문서 크기가 한도에 근접', key, (est/1048576).toFixed(2)+'MB');
+    }
+  } catch(e) {}
+
+  const restRes = await window.fsSaveREST(key, val);
+  let sdkOk = false;
   try {
     const sdkPromise = setDoc(doc(db, FS_COL, key), { data: val, updatedAt: Date.now(), source: window._clientId || 'unknown' });
     const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('sdk-timeout')), 3500));
     await Promise.race([sdkPromise, timeout]);
-  } catch(e) {
-    // SDK 실패해도 REST로 이미 저장됨
+    sdkOk = true;
+  } catch(e) { /* REST 결과로 판단 */ }
+
+  const ok = (restRes && restRes.ok) || sdkOk;
+  if (ok) {
+    delete window._pendingSave[key];          // 저장 확정 → 이후 동기화 허용
+  } else {
+    // 저장 실패 — 화면에 명확히 알린다. (예전에는 조용히 실패하고
+    //  다음 동기화가 서버의 옛 데이터로 방금 입력한 내용을 되돌려버렸음)
+    const msg = restRes && restRes.status === 429 ? 'Firebase 일일 사용량 초과'
+              : restRes && restRes.status === 403 ? 'Firebase 권한 오류(보안 규칙 확인)'
+              : restRes && restRes.status ? `서버 오류 ${restRes.status}`
+              : '네트워크 오류';
+    console.error('[저장 실패]', key, msg, restRes);
+    if (window.showSaveFailure) window.showSaveFailure(key, msg, restRes && restRes.detail);
   }
+  return ok;
 };
 
 // ── Firestore REST API (SDK 차단 환경 폴백 — fetch는 작동 확인됨)
@@ -225,6 +265,20 @@ window.fsLoadREST = async function(key, def) {
   } catch(e) { return def; }
 };
 
+// Firestore 문서 크기 추정 (공식 산정 규칙: 필드명 바이트+1, 문자열 바이트+1, 숫자 8, 불린/널 1)
+// Firestore는 문서 1개당 1 MiB 한도가 있고, 초과하면 쓰기가 400(INVALID_ARGUMENT)으로 거부된다.
+window.FS_DOC_LIMIT = 1048576;
+window.fsEstimateSize = function(v) {
+  if (v === null || v === undefined) return 1;
+  const t = typeof v;
+  if (t === 'boolean') return 1;
+  if (t === 'number')  return 8;
+  if (t === 'string')  return new Blob([v]).size + 1;
+  if (Array.isArray(v)) { let s = 0; for (const x of v) s += window.fsEstimateSize(x); return s; }
+  if (t === 'object') { let s = 0; for (const k in v) s += new Blob([k]).size + 1 + window.fsEstimateSize(v[k]); return s; }
+  return 1;
+};
+
 window.fsSaveREST = async function(key, val) {
   try {
     const body = { fields: {
@@ -232,12 +286,22 @@ window.fsSaveREST = async function(key, val) {
       updatedAt: { integerValue: String(Date.now()) },
       source: { stringValue: window._clientId || 'unknown' }
     }};
-    await fetch(`${FS_REST_BASE}/${key}?key=${FS_API_KEY}`, {
+    const res = await fetch(`${FS_REST_BASE}/${key}?key=${FS_API_KEY}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     });
-  } catch(e) { console.warn('fsSaveREST error:', key, e); }
+    if (!res.ok) {
+      let detail = '';
+      try { const j = await res.json(); detail = j?.error?.message || j?.error?.status || ''; } catch(e) {}
+      console.error('[저장 실패] fsSaveREST', key, res.status, detail);
+      return { ok:false, status:res.status, detail };
+    }
+    return { ok:true };
+  } catch(e) {
+    console.error('[저장 실패] fsSaveREST 네트워크 오류', key, e);
+    return { ok:false, status:0, detail:String(e && e.message || e) };
+  }
 };
 
 // ── Firebase load: SDK 우선, 실패 시 REST 폴백
@@ -262,11 +326,14 @@ const FS_KEYS = [
   'gasims_cartridges_v1','gasims_cartlog_v1',
   'gasims_analysis_v1','gasims_incoming_v1','gasims_orders_v1',
   'gasims_users_v1','gasims_monthly_closing_v1','gasims_daily_closing_v1',
+  'gasims_log_archive_v1',
 ];
 
 // 리스너는 앱 초기화 완료 후 등록 (window.gasImsReady 이벤트 대기)
 const _unsubscribes = [];
 const _clientId = Math.random().toString(36).slice(2);
+// 키별 "내가 마지막으로 저장한 시각" — 서버의 옛 데이터가 새 입력을 덮어쓰지 못하게 막는 기준
+window._localWriteAt = window._localWriteAt || {};
 window._clientId = _clientId; // fsSave에서 참조용
 
 function _subscribe() {
@@ -288,6 +355,14 @@ function _subscribe() {
         localStorage.setItem(key, JSON.stringify(val));
         return;
       }
+
+      // 서버 저장이 확정되지 않은 키는 덮어쓰지 않는다
+      if (window._pendingSave && window._pendingSave[key]) return;
+      // 내가 방금 저장한 것보다 오래된 데이터면 무시 (입력 내용 소실 방지)
+      // 저장 직후 15초 동안만 적용 — 기기 간 시계 오차로 정상 업데이트가 막히지 않도록
+      const _remoteAt = typeof data.updatedAt === 'number' ? data.updatedAt : 0;
+      const _myAt = (window._localWriteAt && window._localWriteAt[key]) || 0;
+      if (_myAt && (Date.now() - _myAt) < 15000 && _remoteAt && _remoteAt <= _myAt) return;
 
       localStorage.setItem(key, JSON.stringify(val));
       window.onFsUpdate && window.onFsUpdate(key, val);
@@ -327,13 +402,23 @@ window.addEventListener('gasImsReady', () => {
         try {
           const res = await fetch(`${FS_REST_BASE}/${key}?key=${FS_API_KEY}`);
           window._readCount = (window._readCount || 0) + 1;
-          if (!res.ok) continue;
+          if (!res.ok) {
+            if (res.status !== 404) console.warn('[동기화 읽기 실패]', key, res.status);
+            continue;
+          }
           const docJson = await res.json();
           if (!docJson.fields || !docJson.fields.data) continue;
           const updatedAt = docJson.fields.updatedAt ? parseInt(docJson.fields.updatedAt.integerValue) : 0;
           const source    = docJson.fields.source ? docJson.fields.source.stringValue : '';
           if (source === _clientId) continue;
           if (_restTimestamps[key] === updatedAt) continue;
+          // ⚠️ 서버 저장이 아직 확정되지 않은 키는 절대 덮어쓰지 않는다.
+          //    (저장 실패 시 서버의 옛 데이터로 방금 입력한 내용이 사라지던 문제의 핵심 방어)
+          if (window._pendingSave && window._pendingSave[key]) continue;
+          // 내가 방금 저장한 것보다 오래된 데이터면 덮어쓰지 않는다 (입력 내용 소실 방지)
+          // 단, 기기 간 시계 오차로 정상 업데이트가 계속 막히지 않도록 저장 직후 15초만 적용
+          const myLastWrite = (window._localWriteAt && window._localWriteAt[key]) || 0;
+          if (myLastWrite && (Date.now() - myLastWrite) < 15000 && updatedAt <= myLastWrite) continue;
           const val = _fromRestValue(docJson.fields.data);
           const local = localStorage.getItem(key);
           _restTimestamps[key] = updatedAt;
@@ -365,7 +450,14 @@ window.addEventListener('gasImsReady', () => {
       if (document.visibilityState === 'visible') { _elapsed = 0; _restSyncAll('visible'); }
     });
   }
-  window.addEventListener('focus', () => { _restSyncAll('focus'); });
+  // 저장 직후 alert을 닫을 때도 focus 이벤트가 발생하므로,
+  // 최근에 로컬 저장이 있었으면 잠시 미룬다 (쓰기 반영 전 조회로 인한 덮어쓰기 방지)
+  window.addEventListener('focus', () => {
+    const recent = Math.max(0, ...Object.values(window._localWriteAt || {0:0}));
+    const since = Date.now() - recent;
+    if (since < 3000) { setTimeout(() => _restSyncAll('focus-delayed'), 3000 - since); return; }
+    _restSyncAll('focus');
+  });
   window.addEventListener('online', () => { _restSyncAll('online'); });
 });
 
@@ -1848,11 +1940,13 @@ console.log('✅ Firebase 초기화 완료');
 
       <!-- LOT 번호 직접 조회 — 업체·규격 상관없이 LOT로 찾아 출고 -->
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:10px">
-        <span style="font-size:11px;font-weight:700;color:var(--accent2);white-space:nowrap">🔍 LOT 번호로 조회</span>
-        <input type="text" id="txnLotSearch" placeholder="예: N2-HP 260715 또는 260715"
-               style="flex:1;min-width:180px;font-family:var(--mono);font-size:12px"
+        <span style="font-size:11px;font-weight:700;color:var(--accent2);white-space:nowrap">🔍 LOT · 용기번호 조회</span>
+        <input type="text" id="txnLotSearch" placeholder="LOT(260715) 또는 용기번호(NK00104) · 여러 개는 쉼표로 구분"
+               style="flex:1;min-width:240px;font-family:var(--mono);font-size:12px"
                onkeydown="if(event.key==='Enter'){event.preventDefault();populateTxnLots();}"
                oninput="populateTxnLots()">
+        <button class="btn btn-sm" id="txnPickMatchBtn" style="display:none;background:rgba(210,153,34,.2);border:1px solid var(--warn);color:var(--warn);font-size:11px;padding:3px 9px;white-space:nowrap"
+                onclick="txnSelectMatched()">🎯 검색된 용기 선택</button>
         <label style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text2);cursor:pointer;white-space:nowrap">
           <input type="checkbox" id="txnIgnoreFilter" onchange="populateTxnLots()" style="width:13px;height:13px;accent-color:var(--warn)">
           가스·규격·업체 무시
@@ -1862,7 +1956,8 @@ console.log('✅ Firebase 초기화 완료');
       </div>
       <div style="font-size:11px;color:var(--text3);margin-bottom:10px">
         예: 15개 출고 → 12개짜리 LOT 전체 선택 + 3개짜리 LOT에서 3개 선택<br>
-        <strong style="color:var(--warn)">해당 업체 병이 아니어도 출고 가능</strong> — LOT 번호로 조회하거나 "가스·규격·업체 무시"를 켜면 전체 LOT에서 선택할 수 있습니다.
+        <strong style="color:var(--warn)">해당 업체 병이 아니어도 출고 가능</strong> — LOT 번호 또는 <strong>용기번호</strong>로 조회하면 가스·규격·업체 조건 없이 찾을 수 있습니다.<br>
+        용기번호로 찾으면 해당 용기가 <span style="color:var(--warn)">노란색으로 표시</span>되고, "검색된 용기 선택" 버튼으로 한 번에 체크됩니다.
       </div>
       <div id="txnLotList" style="background:var(--bg2);border-radius:6px;padding:8px;max-height:320px;overflow-y:auto">
         <div style="color:var(--text3);font-size:12px;padding:8px;text-align:center">가스/규격을 먼저 선택하세요</div>
@@ -2836,6 +2931,36 @@ console.log('✅ Firebase 초기화 완료');
       </div>
     </div>
 
+    <!-- 데이터 용량 진단 / 이력 아카이브 -->
+    <div class="card" style="border-color:rgba(210,153,34,.4)">
+      <div class="sec-h" style="color:var(--warn)">📊 데이터 용량 진단 · 이력 아카이브</div>
+      <div style="font-size:12px;color:var(--text2);margin-bottom:12px;line-height:1.6">
+        Firebase는 <strong>데이터 묶음 하나당 1 MB</strong> 한도가 있습니다. 이력이 쌓여 한도를 넘으면
+        <strong style="color:var(--danger)">새 저장이 거부되어 입력한 내용이 사라집니다.</strong><br>
+        오래된 이력을 아카이브로 옮기면 용량이 줄어 다시 정상 저장됩니다. (아카이브된 이력도 조회 가능)
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
+        <button class="btn btn-primary" onclick="checkDataSize()">🔍 용량 진단</button>
+        <span style="font-size:11px;color:var(--text3)">각 데이터 묶음의 현재 크기를 확인합니다</span>
+      </div>
+      <div id="dataSizeResult" style="font-size:12px"></div>
+
+      <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:14px">
+        <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:8px">📦 오래된 이력 아카이브</div>
+        <div class="flex-gap" style="gap:8px;flex-wrap:wrap;align-items:end">
+          <div class="field" style="margin-bottom:0">
+            <label>이 날짜 <strong>이전</strong> 이력을 아카이브</label>
+            <input type="date" id="archiveBefore" style="width:170px">
+          </div>
+          <button class="btn btn-warn" style="background:var(--warn);color:#161b22;border:none" onclick="archiveOldLogs()">📦 아카이브 실행</button>
+        </div>
+        <div style="font-size:11px;color:var(--text3);margin-top:8px">
+          ⚠️ 실행 전 반드시 <strong>백업 파일 다운로드</strong>를 먼저 받으세요. 아카이브된 이력은 별도 보관되며 이력 조회에서 계속 볼 수 있습니다.
+        </div>
+        <div id="archiveResult" style="font-size:12px;margin-top:8px"></div>
+      </div>
+    </div>
+
     <!-- 전체 초기화 -->
     <div class="card" style="border-color:rgba(248,81,73,.3)">
       <div class="sec-h" style="color:var(--danger)">전체 데이터 초기화</div>
@@ -2864,6 +2989,13 @@ function load(key, def) {
 function save(key, val) {
   // 생산·출고 로그가 바뀌면 용기번호 재고 캐시 무효화 (이력 수정 시에도 정확히 반영)
   if (key === STORE_KEY_LOG && window._invalidateCylCache) window._invalidateCylCache();
+
+  // ⚠️ 내 저장 시각을 기록해 둔다.
+  //    서버에서 이보다 오래된 데이터가 내려오면 "내 것이 더 최신"이므로 덮어쓰지 않는다.
+  //    (저장 직후 동기화가 먼저 도착해 방금 입력한 내용이 사라지던 문제 방지)
+  window._localWriteAt = window._localWriteAt || {};
+  window._localWriteAt[key] = Date.now();
+
   // localStorage에 즉시 저장 (오프라인 대비)
   localStorage.setItem(key, JSON.stringify(val));
   // Firebase에 비동기 저장 (연결 시 자동 업로드)
@@ -3153,6 +3285,156 @@ function initReadMeter() {
 }
 window.addEventListener('load', () => setTimeout(initReadMeter, 1500));
 
+// ══════ 데이터 용량 진단 ══════
+const STORE_KEY_LOG_ARCHIVE = 'gasims_log_archive_v1';
+
+function checkDataSize() {
+  const LIMIT = window.FS_DOC_LIMIT || 1048576;
+  const targets = [
+    ['이력(생산·출고·조정)', STORE_KEY_LOG,      logs],
+    ['재고',                 STORE_KEY_INV,      inventory],
+    ['분석·성적서',          STORE_KEY_ANALYSIS, analysisData],
+    ['카트리지 이력',        STORE_KEY_CART_LOG, cartLogs],
+    ['공병 입고',            STORE_KEY_INCOMING, incomingLogs],
+    ['발주',                 STORE_KEY_ORDERS,   orders],
+    ['일일 마감',            STORE_KEY_DAYCLOSE, dailyClosing],
+    ['카트리지',             STORE_KEY_CART,     cartridges],
+    ['원재료',               STORE_KEY_RAW,      rawMaterials],
+  ];
+  const rows = targets.map(([label, key, data]) => {
+    let size = 0;
+    try { size = window.fsEstimateSize(data || []); } catch(e) {}
+    const pct = size / LIMIT * 100;
+    const cnt = Array.isArray(data) ? data.length : '—';
+    return { label, key, size, pct, cnt };
+  }).sort((a,b) => b.size - a.size);
+
+  const over = rows.filter(r => r.pct >= 100);
+  const near = rows.filter(r => r.pct >= 85 && r.pct < 100);
+
+  document.getElementById('dataSizeResult').innerHTML = `
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>데이터</th><th class="num">건수</th><th class="num">크기</th><th class="num">한도 대비</th><th>상태</th></tr></thead>
+      <tbody>${rows.map(r => {
+        const color = r.pct >= 100 ? 'var(--danger)' : r.pct >= 85 ? 'var(--warn)' : 'var(--accent)';
+        const st    = r.pct >= 100 ? '❌ 한도 초과 — 저장 불가' : r.pct >= 85 ? '⚠️ 한도 임박' : '✅ 정상';
+        return `<tr>
+          <td>${r.label}</td>
+          <td class="num" style="font-family:var(--mono);color:var(--text3)">${r.cnt}</td>
+          <td class="num" style="font-family:var(--mono)">${(r.size/1024).toFixed(0)} KB</td>
+          <td class="num" style="font-family:var(--mono);color:${color};font-weight:700">${r.pct.toFixed(1)}%</td>
+          <td style="color:${color};font-size:11px;font-weight:700">${st}</td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table></div>
+    ${over.length ? `<div style="margin-top:10px;padding:10px 14px;background:rgba(248,81,73,.12);border:1px solid var(--danger);border-radius:8px;color:var(--danger);font-size:12px;line-height:1.6">
+      <strong>🚨 ${over.map(r=>r.label).join(', ')} 이(가) 1 MB 한도를 넘었습니다.</strong><br>
+      이것이 <strong>새 입력이 저장되지 않는 원인</strong>입니다. 아래 아카이브를 실행해 용량을 줄여주세요.
+    </div>` : near.length ? `<div style="margin-top:10px;padding:10px 14px;background:rgba(210,153,34,.12);border:1px solid var(--warn);border-radius:8px;color:var(--warn);font-size:12px">
+      ⚠️ ${near.map(r=>r.label).join(', ')} 이(가) 한도에 근접했습니다. 미리 아카이브를 권장합니다.
+    </div>` : `<div style="margin-top:10px;font-size:12px;color:var(--accent)">✅ 모든 데이터가 한도 내에 있습니다.</div>`}`;
+}
+
+// ══════ 오래된 이력 아카이브 ══════
+function archiveOldLogs() {
+  const before = document.getElementById('archiveBefore').value;
+  if (!before) { alert('아카이브 기준 날짜를 선택해주세요.'); return; }
+
+  const oldLogs = logs.filter(l => (l.date || '') < before);
+  const keep    = logs.filter(l => !((l.date || '') < before));
+  if (!oldLogs.length) { alert(`${before} 이전 이력이 없습니다.`); return; }
+
+  const beforeSize = window.fsEstimateSize(logs);
+  const afterSize  = window.fsEstimateSize(keep);
+
+  if (!confirm(
+    `${before} 이전 이력 ${oldLogs.length}건을 아카이브합니다.\n\n` +
+    `  현재 크기 : ${(beforeSize/1024).toFixed(0)} KB\n` +
+    `  정리 후   : ${(afterSize/1024).toFixed(0)} KB\n` +
+    `  남는 이력 : ${keep.length}건\n\n` +
+    `아카이브된 이력은 별도 보관되며 이력 조회에서 계속 볼 수 있습니다.\n` +
+    `백업 파일은 받으셨나요? 계속하시겠습니까?`
+  )) return;
+
+  // 기존 아카이브에 누적
+  let archive = [];
+  try { archive = JSON.parse(localStorage.getItem(STORE_KEY_LOG_ARCHIVE) || '[]'); } catch(e) {}
+  const ids = new Set(archive.map(l => l.id));
+  oldLogs.forEach(l => { if (!ids.has(l.id)) archive.push(l); });
+
+  // 아카이브가 한도를 넘으면 로컬에만 보관 (서버 저장 생략)
+  const arcSize = window.fsEstimateSize(archive);
+  localStorage.setItem(STORE_KEY_LOG_ARCHIVE, JSON.stringify(archive));
+  if (arcSize < (window.FS_DOC_LIMIT || 1048576) && window.fsSave) {
+    window.fsSave(STORE_KEY_LOG_ARCHIVE, archive);
+  }
+
+  logs = keep;
+  if (window._invalidateCylCache) window._invalidateCylCache();
+  save(STORE_KEY_LOG, logs);
+
+  document.getElementById('archiveResult').innerHTML =
+    `<span style="color:var(--accent)">✅ ${oldLogs.length}건 아카이브 완료 — ` +
+    `${(beforeSize/1024).toFixed(0)} KB → ${(afterSize/1024).toFixed(0)} KB` +
+    `${arcSize >= (window.FS_DOC_LIMIT||1048576) ? ' (아카이브는 이 PC에만 보관)' : ''}</span>`;
+
+  checkDataSize();
+  renderAll && renderAll();
+  alert(`✅ 아카이브 완료\n\n${oldLogs.length}건을 정리했습니다.\n이제 생산 입력이 정상 저장되는지 확인해보세요.`);
+}
+
+// 이력 조회 시 아카이브 포함 (조회 전용)
+function getAllLogsIncludingArchive() {
+  let archive = [];
+  try { archive = JSON.parse(localStorage.getItem(STORE_KEY_LOG_ARCHIVE) || '[]'); } catch(e) {}
+  return archive.length ? archive.concat(logs) : logs;
+}
+
+// ══════ 저장 실패 경고 (조용한 실패 방지) ══════
+// 서버 저장이 실패하면 사용자에게 즉시 알린다.
+// 예전에는 실패해도 아무 표시가 없어서, 다음 동기화가 서버의 옛 데이터로
+// 방금 입력한 내용을 되돌려버리는 일이 있었다.
+window.showSaveFailure = function(key, msg, detail) {
+  let bar = document.getElementById('saveFailBar');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'saveFailBar';
+    bar.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:10050;background:#8b1a1a;color:#fff;' +
+      'padding:12px 18px;font-size:13px;font-weight:700;text-align:center;box-shadow:0 2px 12px rgba(0,0,0,.5);line-height:1.6';
+    document.body.appendChild(bar);
+  }
+  bar.innerHTML =
+    `🚨 서버 저장 실패 — <span style="font-weight:400">${msg}</span><br>` +
+    `<span style="font-size:11px;font-weight:400">입력하신 내용은 이 PC에만 저장되어 있습니다. 다른 기기와 동기화되지 않았습니다.</span><br>` +
+    `<button onclick="retryPendingSaves()" style="margin-top:6px;background:#fff;color:#8b1a1a;border:none;border-radius:5px;padding:4px 14px;font-size:12px;font-weight:700;cursor:pointer">🔄 다시 저장 시도</button>` +
+    `<button onclick="document.getElementById('saveFailBar').remove()" style="margin:6px 0 0 6px;background:transparent;color:#fff;border:1px solid rgba(255,255,255,.5);border-radius:5px;padding:4px 12px;font-size:12px;cursor:pointer">닫기</button>`;
+};
+
+// 저장 실패한 항목 재시도
+async function retryPendingSaves() {
+  const keys = Object.keys(window._pendingSave || {});
+  if (!keys.length) {
+    const b = document.getElementById('saveFailBar'); if (b) b.remove();
+    alert('저장되지 않은 항목이 없습니다.');
+    return;
+  }
+  let ok = 0, fail = 0;
+  for (const k of keys) {
+    try {
+      const raw = localStorage.getItem(k);
+      if (raw == null) { delete window._pendingSave[k]; continue; }
+      const good = await window.fsSave(k, JSON.parse(raw));
+      good ? ok++ : fail++;
+    } catch(e) { fail++; }
+  }
+  if (!fail) {
+    const b = document.getElementById('saveFailBar'); if (b) b.remove();
+    alert(`✅ ${ok}건 저장 완료 — 동기화됐습니다.`);
+  } else {
+    alert(`⚠️ ${ok}건 성공 / ${fail}건 여전히 실패\n\n네트워크 상태와 Firebase 사용량을 확인해주세요.\n(F12 → Console 에 자세한 오류가 표시됩니다)`);
+  }
+}
+
 // 연결 상태 배너
 function showSyncStatus(msg, color) {
   let bar = document.getElementById('syncStatusBar');
@@ -3185,6 +3467,9 @@ window.onFsUpdate = function(key, val) {
       _invalidateCylCache();
       // 마감 화면을 실제로 보고 있을 때만 갱신 (기존 style.display 검사는 항상 참이었음)
       if(document.getElementById('page-closing')?.classList.contains('active')) loadClosingSnapshot();
+      break;
+    case 'gasims_log_archive_v1':
+      localStorage.setItem('gasims_log_archive_v1', JSON.stringify(val));
       break;
     case STORE_KEY_LOG:
       logs = val;
@@ -5535,6 +5820,17 @@ function closeTxn() {
 }
 
 // ── 출고 가능 LOT 드롭다운 채우기
+// 검색어와 일치한 용기번호 (하이라이트 · 일괄선택용)
+let txnMatchedCyls = new Set();
+
+// 검색된 용기만 한 번에 체크
+function txnSelectMatched() {
+  const boxes = [...document.querySelectorAll('.txn-cyl-chk[data-hit="1"]')];
+  if (!boxes.length) { alert('검색된 용기가 없습니다.'); return; }
+  boxes.forEach(b => { b.checked = true; });
+  updateTxnTotalSelected();
+}
+
 function populateTxnLots() {
   const gas  = document.getElementById('txnGas').value;
   const size = document.getElementById('txnSize').value;
@@ -5583,14 +5879,19 @@ function populateTxnLots() {
   // 4) 필터링
   // LOT 번호 검색어가 있거나 "필터 무시"가 켜져 있으면 가스·규격 조건을 풀어준다.
   // (한 LOT에 업체·규격이 섞여 있을 수 있고, 해당 업체 병이 아니어도 출고될 수 있으므로)
-  const lotQuery    = (document.getElementById('txnLotSearch')?.value || '').trim().toUpperCase();
-  const ignoreFilter = !!document.getElementById('txnIgnoreFilter')?.checked || !!lotQuery;
+  // 검색어는 LOT 번호와 용기번호를 함께 찾는다. 쉼표·공백으로 여러 개 입력 가능.
+  const rawQuery = (document.getElementById('txnLotSearch')?.value || '').trim();
+  const tokens   = rawQuery.split(/[,\s]+/).map(t => t.trim().toUpperCase()).filter(Boolean);
+  const hasQuery = tokens.length > 0;
+  const ignoreFilter = !!document.getElementById('txnIgnoreFilter')?.checked || hasQuery;
+
+  // 검색어와 일치한 용기번호 모음 (하이라이트·일괄선택용)
+  txnMatchedCyls = new Set();
 
   let available = Object.values(produceLots).filter(lot => {
-    if (lotQuery && !String(lot.lotNo).toUpperCase().includes(lotQuery)) return false;
-    if (!ignoreFilter && (!gas || lot.gas !== gas)) return false;
     const shipped = shippedCylsByLot[lot.lotNo] || new Set();
-    // 규격 필터: 실린더 단위로 적용 — 혼합 LOT에서 선택 규격의 실린더만 표시
+
+    // 남은 실린더 산출 (규격 필터는 검색·무시 모드가 아닐 때만 적용)
     lot._remainingCyls = lot.containers.filter(no => {
       if (shipped.has(no)) return false;
       if (!ignoreFilter && size) {
@@ -5599,16 +5900,35 @@ function populateTxnLots() {
       }
       return true;
     });
-    return lot._remainingCyls.length > 0;
+    if (!lot._remainingCyls.length) return false;
+
+    if (hasQuery) {
+      // LOT 번호가 걸리면 LOT 전체를, 용기번호가 걸리면 그 용기를 표시 대상으로 삼는다
+      const lotUp = String(lot.lotNo).toUpperCase();
+      const lotHit = tokens.some(t => lotUp.includes(t));
+      const cylHits = lot._remainingCyls.filter(no => tokens.some(t => String(no).toUpperCase().includes(t)));
+      if (!lotHit && !cylHits.length) return false;
+      cylHits.forEach(no => txnMatchedCyls.add(no));
+      return true;
+    }
+
+    if (!gas || lot.gas !== gas) return false;
+    return true;
   });
 
   available.sort((a,b) => (b.analysisDate||b.date||'').localeCompare(a.analysisDate||a.date||''));
 
   const countEl = document.getElementById('txnLotCount');
-  if (countEl) countEl.textContent = `출고 가능 LOT ${available.length}개${ignoreFilter ? ' · 전체 조회' : ''}`;
+  if (countEl) countEl.textContent = `출고 가능 LOT ${available.length}개` +
+    (txnMatchedCyls.size ? ` · 용기 ${txnMatchedCyls.size}개 일치` : (ignoreFilter ? ' · 전체 조회' : ''));
+  const pickBtn = document.getElementById('txnPickMatchBtn');
+  if (pickBtn) {
+    pickBtn.style.display = txnMatchedCyls.size ? 'inline-block' : 'none';
+    pickBtn.textContent = `🎯 검색된 용기 ${txnMatchedCyls.size}개 선택`;
+  }
 
   if (!available.length) {
-    listEl.innerHTML = `<div style="color:var(--text3);font-size:12px;padding:12px;text-align:center">출고 가능한 LOT가 없습니다<br><span style="font-size:11px">${lotQuery ? 'LOT 번호를 다시 확인해주세요' : '가스/규격을 선택하거나 LOT 번호로 조회하세요'}</span></div>`;
+    listEl.innerHTML = `<div style="color:var(--text3);font-size:12px;padding:12px;text-align:center">출고 가능한 LOT가 없습니다<br><span style="font-size:11px">${hasQuery ? 'LOT 번호 또는 용기번호를 다시 확인해주세요 (이미 출고된 용기일 수 있습니다)' : '가스/규격을 선택하거나 LOT · 용기번호로 조회하세요'}</span></div>`;
     updateTxnTotalSelected();
     return;
   }
@@ -5640,10 +5960,11 @@ function populateTxnLots() {
             // LOT 안에 규격이 섞여 있으면 실린더마다 규격을 표시해 구분
             const cs = (lot.cylSizes && lot.cylSizes[no]) || lot.size || '';
             const mixed = lot._sizeMixed;
+            const hit = txnMatchedCyls.has(no);
             return `
-            <label style="display:flex;align-items:center;gap:6px;padding:5px 8px;background:var(--bg2);border-radius:6px;cursor:pointer;font-size:12px">
-              <input type="checkbox" class="txn-cyl-chk" data-lotno="${lot.lotNo}" value="${no}" data-size="${cs}"
-                style="width:14px;height:14px;accent-color:var(--accent2)" onchange="updateTxnTotalSelected()">
+            <label style="display:flex;align-items:center;gap:6px;padding:5px 8px;border-radius:6px;cursor:pointer;font-size:12px;${hit ? 'background:rgba(210,153,34,.22);border:1px solid var(--warn)' : 'background:var(--bg2);border:1px solid transparent'}">
+              <input type="checkbox" class="txn-cyl-chk" data-lotno="${lot.lotNo}" value="${no}" data-size="${cs}"${hit ? ' data-hit="1"' : ''}
+                style="width:14px;height:14px;accent-color:${hit ? 'var(--warn)' : 'var(--accent2)'}" onchange="updateTxnTotalSelected()">
               <span style="color:var(--text3);font-size:10px;font-family:var(--mono)">${idx+1}</span>
               <span style="font-family:var(--mono)">${no}</span>
               ${mixed ? `<span style="margin-left:auto;font-size:9px;font-family:var(--mono);color:var(--warn);background:rgba(210,153,34,.15);padding:1px 5px;border-radius:3px">${cs}</span>` : ''}
