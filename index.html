@@ -295,12 +295,13 @@ window.fsEstimateSize = function(v) {
     const n = v.length;
     if (!n) return 0;
     // 항목이 많으면 앞·중간·뒤에서 표본을 뽑아 추정 (전수 계산 시 화면이 멈추는 것 방지)
-    if (n > 300) {
+    if (n > 600) {
+      // 표본 300개로 추정 (전수 계산은 화면이 멈춤)
       const idxs = [];
-      for (let i = 0; i < 100; i++) idxs.push(Math.floor(i * (n - 1) / 99));
+      for (let i = 0; i < 300; i++) idxs.push(Math.floor(i * (n - 1) / 299));
       let s = 0;
       for (const i of idxs) s += window.fsEstimateSize(v[i]);
-      return Math.round(s / idxs.length * n);
+      return Math.round(s / idxs.length * n * 1.08);   // 문서 부가정보 감안 여유분
     }
     let s = 0;
     for (const x of v) s += window.fsEstimateSize(x);
@@ -316,39 +317,77 @@ window.fsEstimateSize = function(v) {
 //  용기 항목의 size/company는 대부분 LOT 값과 같고, no는 순서로 알 수 있어
 //  이 셋을 빼면 저장 용량이 절반 이하로 줄어든다.
 // ══════════════════════════════════════════════════════════════
+// 이력 종류별 기본 이름표 — type만 있으면 알 수 있으므로 저장하지 않는다
+const _LOG_TYPE_LABEL = { produce:'생산', ship:'출고', adjust:'조정', incoming:'공병입고' };
+
+// 저장(전송) 직전에 군더더기를 덜어낸다.
+//  · 비어 있는 값(memo:'', lotNo:'', cylinders:[], containers:[], cooldown:[])은 아예 빼고
+//  · type으로 알 수 있는 typeLabel도 빼고
+//  · 0인 증감값(dFull/dEmpty)도 빼고
+//  · 용기 항목의 긴 필드명은 한 글자로 줄인다 (container→c, pAfter→p ...)
+//  빠진 값은 _expandLogsAfterLoad가 전부 되돌리므로 화면은 달라지지 않는다.
 function _compactLogsForSave(arr) {
   if (!Array.isArray(arr)) return arr;
   return arr.map(l => {
-    if (!l || !Array.isArray(l.containers) || !l.containers.length) return l;
-    const out = { ...l };
-    out.containers = l.containers.map((c, i) => {
-      if (typeof c === 'string') return c;
-      const s = {};
-      if (c.container != null) s.container = c.container;
-      if (c.no != null && c.no !== i + 1) s.no = c.no;              // 순번이 다를 때만
-      if (c.size && c.size !== l.size) s.size = c.size;              // LOT과 다를 때만
-      if (c.company && c.company !== l.company) s.company = c.company;
-      if (c.pAfter != null) s.pAfter = c.pAfter;
-      if (c.note) s.note = c.note;                                   // 비어있지 않을 때만
-      return s;
-    });
+    if (!l || typeof l !== 'object') return l;
+    const out = {};
+    for (const k in l) {
+      const v = l[k];
+      if (v === undefined || v === null) continue;                       // 빈 값
+      if (Array.isArray(v) && v.length === 0) continue;                  // 빈 배열
+      if (v === '' && (k === 'memo' || k === 'lotNo')) continue;         // 빈 메모/LOT
+      if ((k === 'dFull' || k === 'dEmpty') && v === 0) continue;        // 증감 0
+      if (k === 'typeLabel' && v === _LOG_TYPE_LABEL[l.type]) continue;  // 기본 이름표
+      if (k === 'containers') continue;                                  // 아래에서 따로
+      out[k] = v;
+    }
+    if (Array.isArray(l.containers) && l.containers.length) {
+      out.containers = l.containers.map((c, i) => {
+        if (typeof c === 'string') return c;
+        if (!c || typeof c !== 'object') return c;
+        const s = {};
+        if (c.container != null && c.container !== '') s.c = c.container;
+        if (c.no != null && c.no !== i + 1)            s.i = c.no;   // 순번이 다를 때만
+        if (c.size && c.size !== l.size)               s.s = c.size; // LOT과 다를 때만
+        if (c.company && c.company !== l.company)      s.m = c.company;
+        if (c.pAfter != null)                          s.p = c.pAfter;
+        if (c.note)                                    s.n = c.note;
+        return s;
+      });
+    }
     return out;
   });
 }
 
+// 불러온 뒤 원래 모습으로 되돌린다.
+//  예전 방식으로 저장된 데이터(긴 필드명)와 새 방식(짧은 필드명)을 모두 알아본다.
 function _expandLogsAfterLoad(arr) {
   if (!Array.isArray(arr)) return arr;
   arr.forEach(l => {
-    if (!l || !Array.isArray(l.containers)) return;
+    if (!l || typeof l !== 'object') return;
+    if (l.typeLabel == null) l.typeLabel = _LOG_TYPE_LABEL[l.type] || l.type || '';
+    if (l.memo   == null) l.memo   = '';
+    if (l.lotNo  == null) l.lotNo  = '';
+    if (l.dFull  == null) l.dFull  = 0;
+    if (l.dEmpty == null) l.dEmpty = 0;
+    if (!Array.isArray(l.containers)) return;
     l.containers = l.containers.map((c, i) => {
       if (typeof c === 'string') return { no: i + 1, container: c, size: l.size, company: l.company, pAfter: null, note: '' };
+      if (!c || typeof c !== 'object') return c;
+      // 짧은 이름(신규) 우선, 없으면 긴 이름(기존)
+      const cont = c.c !== undefined ? c.c : c.container;
+      const cNo  = c.i !== undefined ? c.i : c.no;
+      const cSz  = c.s !== undefined ? c.s : c.size;
+      const cCo  = c.m !== undefined ? c.m : c.company;
+      const cPa  = c.p !== undefined ? c.p : c.pAfter;
+      const cNt  = c.n !== undefined ? c.n : c.note;
       return {
-        no:      c.no != null ? c.no : i + 1,
-        container: c.container,
-        size:    c.size    != null ? c.size    : l.size,
-        company: c.company != null ? c.company : l.company,
-        pAfter:  c.pAfter  != null ? c.pAfter  : null,
-        note:    c.note    != null ? c.note    : ''
+        no:        cNo != null ? cNo : i + 1,
+        container: cont,
+        size:      cSz != null ? cSz : l.size,
+        company:   cCo != null ? cCo : l.company,
+        pAfter:    cPa != null ? cPa : null,
+        note:      cNt != null ? cNt : ''
       };
     });
   });
@@ -3028,7 +3067,7 @@ console.log('✅ Firebase 초기화 완료');
       <div style="font-size:12px;color:var(--text2);margin-bottom:12px;line-height:1.6">
         Firebase는 <strong>데이터 묶음 하나당 1 MB</strong> 한도가 있습니다. 이력이 쌓여 한도를 넘으면
         <strong style="color:var(--danger)">새 저장이 거부되어 입력한 내용이 사라집니다.</strong><br>
-        오래된 이력을 아카이브로 옮기면 용량이 줄어 다시 정상 저장됩니다. (아카이브된 이력도 조회 가능)
+        아래 <strong style="color:var(--accent)">압축해서 다시 저장</strong>을 누르면 데이터를 하나도 지우지 않고 용량이 절반 이하로 줄어듭니다.
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
         <button class="btn btn-primary" onclick="checkDataSize()">🔍 용량 진단</button>
@@ -3410,11 +3449,18 @@ function _checkDataSizeRun() {
     ['원재료',               STORE_KEY_RAW,      rawMaterials],
   ];
   const rows = targets.map(([label, key, data]) => {
-    let size = 0;
-    try { size = window.fsEstimateSize(data || []); } catch(e) {}
+    let size = 0, raw = 0;
+    try {
+      raw = window.fsEstimateSize(data || []);
+      // 이력은 압축해서 보내므로, 실제 서버에 저장되는 크기로 판정해야 한다.
+      // (예전에는 압축 전 크기로 계산해 멀쩡한데도 '한도 초과'로 표시됐다)
+      size = (key === STORE_KEY_LOG)
+        ? window.fsEstimateSize(_compactLogsForSave(data || []))
+        : raw;
+    } catch(e) {}
     const pct = size / LIMIT * 100;
     const cnt = Array.isArray(data) ? data.length : '—';
-    return { label, key, size, pct, cnt };
+    return { label, key, size, raw, pct, cnt };
   }).sort((a,b) => b.size - a.size);
 
   const over = rows.filter(r => r.pct >= 100);
@@ -3422,14 +3468,17 @@ function _checkDataSizeRun() {
 
   document.getElementById('dataSizeResult').innerHTML = `
     <div class="tbl-wrap"><table>
-      <thead><tr><th>데이터</th><th class="num">건수</th><th class="num">크기</th><th class="num">한도 대비</th><th>상태</th></tr></thead>
+      <thead><tr><th>데이터</th><th class="num">건수</th><th class="num">실제 저장 크기</th><th class="num">한도 대비</th><th>상태</th></tr></thead>
       <tbody>${rows.map(r => {
         const color = r.pct >= 100 ? 'var(--danger)' : r.pct >= 85 ? 'var(--warn)' : 'var(--accent)';
         const st    = r.pct >= 100 ? '❌ 한도 초과 — 저장 불가' : r.pct >= 85 ? '⚠️ 한도 임박' : '✅ 정상';
         return `<tr>
           <td>${r.label}</td>
           <td class="num" style="font-family:var(--mono);color:var(--text3)">${r.cnt}</td>
-          <td class="num" style="font-family:var(--mono)">${(r.size/1024).toFixed(0)} KB</td>
+          <td class="num" style="font-family:var(--mono)">${(r.size/1024).toFixed(0)} KB${
+            r.raw && r.raw > r.size * 1.02
+              ? `<br><span style="font-size:10px;color:var(--text3);font-weight:400">원본 ${(r.raw/1024).toFixed(0)} KB</span>`
+              : ''}</td>
           <td class="num" style="font-family:var(--mono);color:${color};font-weight:700">${r.pct.toFixed(1)}%</td>
           <td style="color:${color};font-size:11px;font-weight:700">${st}</td>
         </tr>`;
@@ -3437,9 +3486,10 @@ function _checkDataSizeRun() {
     </table></div>
     ${over.length ? `<div style="margin-top:10px;padding:10px 14px;background:rgba(248,81,73,.12);border:1px solid var(--danger);border-radius:8px;color:var(--danger);font-size:12px;line-height:1.6">
       <strong>🚨 ${over.map(r=>r.label).join(', ')} 이(가) 1 MB 한도를 넘었습니다.</strong><br>
-      이것이 <strong>새 입력이 저장되지 않는 원인</strong>입니다. 아래 아카이브를 실행해 용량을 줄여주세요.
+      이것이 <strong>새 입력이 저장되지 않는 원인</strong>입니다. 아래 <strong>🗜 압축해서 다시 저장</strong>을 실행해주세요.
     </div>` : near.length ? `<div style="margin-top:10px;padding:10px 14px;background:rgba(210,153,34,.12);border:1px solid var(--warn);border-radius:8px;color:var(--warn);font-size:12px">
-      ⚠️ ${near.map(r=>r.label).join(', ')} 이(가) 한도에 근접했습니다. 미리 아카이브를 권장합니다.
+      ⚠️ ${near.map(r=>r.label).join(', ')} 이(가) 한도에 근접했습니다.<br>
+      <strong>실제 Firebase 기준으로는 이미 한도를 넘었을 수 있습니다.</strong> 아래 <strong>🗜 압축해서 다시 저장</strong>을 실행해주세요.
     </div>` : `<div style="margin-top:10px;font-size:12px;color:var(--accent)">✅ 모든 데이터가 한도 내에 있습니다.</div>`}`;
 }
 
