@@ -178,6 +178,7 @@ window.fsSave = async function(key, val) {
 
   // ⚠️ Firestore 문서 크기 한도(1 MiB) 사전 검사
   //    초과하면 서버가 400으로 거부하므로, 미리 감지해 명확히 알린다.
+  //    저장 때마다 전수 계산하면 느리므로 표본 추정을 사용한다.
   try {
     const est = window.fsEstimateSize(val);
     window._docSizes = window._docSizes || {};
@@ -268,14 +269,41 @@ window.fsLoadREST = async function(key, def) {
 // Firestore 문서 크기 추정 (공식 산정 규칙: 필드명 바이트+1, 문자열 바이트+1, 숫자 8, 불린/널 1)
 // Firestore는 문서 1개당 1 MiB 한도가 있고, 초과하면 쓰기가 400(INVALID_ARGUMENT)으로 거부된다.
 window.FS_DOC_LIMIT = 1048576;
+// 문자열 UTF-8 바이트 길이 — Blob을 매번 만들면 매우 느리므로 직접 계산
+function _utf8Len(s) {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 0x80) n += 1;
+    else if (c < 0x800) n += 2;
+    else if (c >= 0xD800 && c <= 0xDBFF) { n += 4; i++; }   // 서러게이트 페어
+    else n += 3;
+  }
+  return n;
+}
+
 window.fsEstimateSize = function(v) {
   if (v === null || v === undefined) return 1;
   const t = typeof v;
   if (t === 'boolean') return 1;
   if (t === 'number')  return 8;
-  if (t === 'string')  return new Blob([v]).size + 1;
-  if (Array.isArray(v)) { let s = 0; for (const x of v) s += window.fsEstimateSize(x); return s; }
-  if (t === 'object') { let s = 0; for (const k in v) s += new Blob([k]).size + 1 + window.fsEstimateSize(v[k]); return s; }
+  if (t === 'string')  return _utf8Len(v) + 1;
+  if (Array.isArray(v)) {
+    const n = v.length;
+    if (!n) return 0;
+    // 항목이 많으면 앞·중간·뒤에서 표본을 뽑아 추정 (전수 계산 시 화면이 멈추는 것 방지)
+    if (n > 300) {
+      const idxs = [];
+      for (let i = 0; i < 100; i++) idxs.push(Math.floor(i * (n - 1) / 99));
+      let s = 0;
+      for (const i of idxs) s += window.fsEstimateSize(v[i]);
+      return Math.round(s / idxs.length * n);
+    }
+    let s = 0;
+    for (const x of v) s += window.fsEstimateSize(x);
+    return s;
+  }
+  if (t === 'object') { let s = 0; for (const k in v) s += _utf8Len(k) + 1 + window.fsEstimateSize(v[k]); return s; }
   return 1;
 };
 
@@ -3302,6 +3330,13 @@ window.addEventListener('load', () => setTimeout(initReadMeter, 1500));
 const STORE_KEY_LOG_ARCHIVE = 'gasims_log_archive_v1';
 
 function checkDataSize() {
+  const el = document.getElementById('dataSizeResult');
+  if (el) el.innerHTML = '<div style="padding:12px;color:var(--text3);font-size:12px">⏳ 용량 계산 중...</div>';
+  // 화면이 먼저 그려진 뒤 계산하도록 한 프레임 넘긴다
+  setTimeout(_checkDataSizeRun, 30);
+}
+
+function _checkDataSizeRun() {
   const LIMIT = window.FS_DOC_LIMIT || 1048576;
   const targets = [
     ['이력(생산·출고·조정)', STORE_KEY_LOG,      logs],
@@ -4808,7 +4843,12 @@ function onLotKeyNav(e, el) {
 }
 
 function onLotInput() {
-  document.getElementById('lotCount').textContent = filled;
+  // 입력된 용기번호 개수를 센다. (기존에는 정의되지 않은 변수를 참조해
+  //  ReferenceError가 발생하면서 용기번호 입력 화면이 멈추는 문제가 있었음)
+  const filled = [...document.querySelectorAll('.lot-container-inp')]
+    .filter(i => i.value.trim()).length;
+  const el = document.getElementById('lotCount');
+  if (el) el.textContent = filled;
   renderProdPreview();
 }
 
