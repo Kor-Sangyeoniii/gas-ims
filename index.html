@@ -176,11 +176,14 @@ window.fsSave = async function(key, val) {
   // 서버 저장이 확인될 때까지 "미확정" 표시 → 이 동안은 폴링/리스너가 로컬을 덮어쓰지 않음
   window._pendingSave[key] = true;
 
+  // 이력은 서버로 보낼 때만 중복 필드를 뺀다 (화면 데이터는 그대로 유지)
+  const sendVal = (key === 'gasims_log_v2') ? _compactLogsForSave(val) : val;
+
   // ⚠️ Firestore 문서 크기 한도(1 MiB) 사전 검사
   //    초과하면 서버가 400으로 거부하므로, 미리 감지해 명확히 알린다.
   //    저장 때마다 전수 계산하면 느리므로 표본 추정을 사용한다.
   try {
-    const est = window.fsEstimateSize(val);
+    const est = window.fsEstimateSize(sendVal);
     window._docSizes = window._docSizes || {};
     window._docSizes[key] = est;
     if (est > window.FS_DOC_LIMIT) {
@@ -197,10 +200,10 @@ window.fsSave = async function(key, val) {
     }
   } catch(e) {}
 
-  const restRes = await window.fsSaveREST(key, val);
+  const restRes = await window.fsSaveREST(key, sendVal);
   let sdkOk = false;
   try {
-    const sdkPromise = setDoc(doc(db, FS_COL, key), { data: val, updatedAt: Date.now(), source: window._clientId || 'unknown' });
+    const sdkPromise = setDoc(doc(db, FS_COL, key), { data: sendVal, updatedAt: Date.now(), source: window._clientId || 'unknown' });
     const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('sdk-timeout')), 3500));
     await Promise.race([sdkPromise, timeout]);
     sdkOk = true;
@@ -307,6 +310,51 @@ window.fsEstimateSize = function(v) {
   return 1;
 };
 
+// ══════════════════════════════════════════════════════════════
+//  이력 데이터 압축 — 서버에 보낼 때만 중복 필드를 빼고, 받을 때 되돌린다.
+//  화면·수정·조회는 전혀 달라지지 않는다. (데이터를 지우거나 감추지 않음)
+//  용기 항목의 size/company는 대부분 LOT 값과 같고, no는 순서로 알 수 있어
+//  이 셋을 빼면 저장 용량이 절반 이하로 줄어든다.
+// ══════════════════════════════════════════════════════════════
+function _compactLogsForSave(arr) {
+  if (!Array.isArray(arr)) return arr;
+  return arr.map(l => {
+    if (!l || !Array.isArray(l.containers) || !l.containers.length) return l;
+    const out = { ...l };
+    out.containers = l.containers.map((c, i) => {
+      if (typeof c === 'string') return c;
+      const s = {};
+      if (c.container != null) s.container = c.container;
+      if (c.no != null && c.no !== i + 1) s.no = c.no;              // 순번이 다를 때만
+      if (c.size && c.size !== l.size) s.size = c.size;              // LOT과 다를 때만
+      if (c.company && c.company !== l.company) s.company = c.company;
+      if (c.pAfter != null) s.pAfter = c.pAfter;
+      if (c.note) s.note = c.note;                                   // 비어있지 않을 때만
+      return s;
+    });
+    return out;
+  });
+}
+
+function _expandLogsAfterLoad(arr) {
+  if (!Array.isArray(arr)) return arr;
+  arr.forEach(l => {
+    if (!l || !Array.isArray(l.containers)) return;
+    l.containers = l.containers.map((c, i) => {
+      if (typeof c === 'string') return { no: i + 1, container: c, size: l.size, company: l.company, pAfter: null, note: '' };
+      return {
+        no:      c.no != null ? c.no : i + 1,
+        container: c.container,
+        size:    c.size    != null ? c.size    : l.size,
+        company: c.company != null ? c.company : l.company,
+        pAfter:  c.pAfter  != null ? c.pAfter  : null,
+        note:    c.note    != null ? c.note    : ''
+      };
+    });
+  });
+  return arr;
+}
+
 window.fsSaveREST = async function(key, val) {
   try {
     const body = { fields: {
@@ -375,6 +423,7 @@ function _subscribe() {
       window._readCount = (window._readCount || 0) + 1;
       if (!snap.exists()) return;
       const data = snap.data();
+      if (key === 'gasims_log_v2' && data && Array.isArray(data.data)) _expandLogsAfterLoad(data.data);
       const val  = data.data;
       window._lastSync = new Date().toLocaleTimeString();
 
@@ -460,7 +509,8 @@ window.addEventListener('gasImsReady', () => {
           // 단, 기기 간 시계 오차로 정상 업데이트가 계속 막히지 않도록 저장 직후 15초만 적용
           const myLastWrite = (window._localWriteAt && window._localWriteAt[key]) || 0;
           if (myLastWrite && (Date.now() - myLastWrite) < 15000 && updatedAt <= myLastWrite) continue;
-          const val = _fromRestValue(docJson.fields.data);
+          let val = _fromRestValue(docJson.fields.data);
+          if (key === 'gasims_log_v2') val = _expandLogsAfterLoad(val);
           const local = localStorage.getItem(key);
           _restTimestamps[key] = updatedAt;
           if (JSON.stringify(val) !== local) {
@@ -2987,17 +3037,13 @@ console.log('✅ Firebase 초기화 완료');
       <div id="dataSizeResult" style="font-size:12px"></div>
 
       <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:14px">
-        <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:8px">📦 오래된 이력 아카이브</div>
-        <div class="flex-gap" style="gap:8px;flex-wrap:wrap;align-items:end">
-          <div class="field" style="margin-bottom:0">
-            <label>이 날짜 <strong>이전</strong> 이력을 아카이브</label>
-            <input type="date" id="archiveBefore" style="width:170px">
-          </div>
-          <button class="btn btn-warn" style="background:var(--warn);color:#161b22;border:none" onclick="archiveOldLogs()">📦 아카이브 실행</button>
+        <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:8px">🗜 이력 압축 저장</div>
+        <div style="font-size:12px;color:var(--text2);line-height:1.6;margin-bottom:10px">
+          이력에는 용기마다 규격·업체·순번이 중복 저장되어 있습니다. 이 중복만 걷어내면
+          <strong style="color:var(--accent)">데이터를 하나도 지우지 않고</strong> 저장 용량이 절반 이하로 줄어듭니다.<br>
+          <strong>모든 이력은 그대로 남아 조회·수정 가능합니다.</strong> 화면에서 달라지는 것은 없습니다.
         </div>
-        <div style="font-size:11px;color:var(--text3);margin-top:8px">
-          ⚠️ 실행 전 반드시 <strong>백업 파일 다운로드</strong>를 먼저 받으세요. 아카이브된 이력은 별도 보관되며 이력 조회에서 계속 볼 수 있습니다.
-        </div>
+        <button class="btn btn-success" onclick="compactAndResave()">🗜 압축해서 다시 저장</button>
         <div id="archiveResult" style="font-size:12px;margin-top:8px"></div>
       </div>
     </div>
@@ -3383,59 +3429,39 @@ function _checkDataSizeRun() {
     </div>` : `<div style="margin-top:10px;font-size:12px;color:var(--accent)">✅ 모든 데이터가 한도 내에 있습니다.</div>`}`;
 }
 
-// ══════ 오래된 이력 아카이브 ══════
-function archiveOldLogs() {
-  const before = document.getElementById('archiveBefore').value;
-  if (!before) { alert('아카이브 기준 날짜를 선택해주세요.'); return; }
-
-  const oldLogs = logs.filter(l => (l.date || '') < before);
-  const keep    = logs.filter(l => !((l.date || '') < before));
-  if (!oldLogs.length) { alert(`${before} 이전 이력이 없습니다.`); return; }
-
-  const beforeSize = window.fsEstimateSize(logs);
-  const afterSize  = window.fsEstimateSize(keep);
+// ══════ 이력 압축 재저장 (데이터 보존) ══════
+function compactAndResave() {
+  const before = window.fsEstimateSize(logs);
+  const after  = window.fsEstimateSize(_compactLogsForSave(logs));
+  const LIMIT  = window.FS_DOC_LIMIT || 1048576;
 
   if (!confirm(
-    `${before} 이전 이력 ${oldLogs.length}건을 아카이브합니다.\n\n` +
-    `  현재 크기 : ${(beforeSize/1024).toFixed(0)} KB\n` +
-    `  정리 후   : ${(afterSize/1024).toFixed(0)} KB\n` +
-    `  남는 이력 : ${keep.length}건\n\n` +
-    `아카이브된 이력은 별도 보관되며 이력 조회에서 계속 볼 수 있습니다.\n` +
-    `백업 파일은 받으셨나요? 계속하시겠습니까?`
+    `이력 ${logs.length}건을 압축해서 다시 저장합니다.\n\n` +
+    `  현재 저장 용량 : ${(before/1024).toFixed(0)} KB\n` +
+    `  압축 후        : ${(after/1024).toFixed(0)} KB  (${(100-after/before*100).toFixed(0)}% 감소)\n\n` +
+    `⚠️ 이력은 한 건도 지워지지 않습니다. 조회·수정 모두 그대로 됩니다.\n` +
+    `백업은 받으셨나요? 계속하시겠습니까?`
   )) return;
 
-  // 기존 아카이브에 누적
-  let archive = [];
-  try { archive = JSON.parse(localStorage.getItem(STORE_KEY_LOG_ARCHIVE) || '[]'); } catch(e) {}
-  const ids = new Set(archive.map(l => l.id));
-  oldLogs.forEach(l => { if (!ids.has(l.id)) archive.push(l); });
+  const el = document.getElementById('archiveResult');
+  if (el) el.innerHTML = '<span style="color:var(--text3)">⏳ 저장 중...</span>';
 
-  // 아카이브가 한도를 넘으면 로컬에만 보관 (서버 저장 생략)
-  const arcSize = window.fsEstimateSize(archive);
-  localStorage.setItem(STORE_KEY_LOG_ARCHIVE, JSON.stringify(archive));
-  if (arcSize < (window.FS_DOC_LIMIT || 1048576) && window.fsSave) {
-    window.fsSave(STORE_KEY_LOG_ARCHIVE, archive);
-  }
-
-  logs = keep;
-  if (window._invalidateCylCache) window._invalidateCylCache();
+  // logs 자체는 그대로 두고 저장만 다시 시도 (압축은 전송 단계에서 적용됨)
   save(STORE_KEY_LOG, logs);
 
-  document.getElementById('archiveResult').innerHTML =
-    `<span style="color:var(--accent)">✅ ${oldLogs.length}건 아카이브 완료 — ` +
-    `${(beforeSize/1024).toFixed(0)} KB → ${(afterSize/1024).toFixed(0)} KB` +
-    `${arcSize >= (window.FS_DOC_LIMIT||1048576) ? ' (아카이브는 이 PC에만 보관)' : ''}</span>`;
-
-  checkDataSize();
-  renderAll && renderAll();
-  alert(`✅ 아카이브 완료\n\n${oldLogs.length}건을 정리했습니다.\n이제 생산 입력이 정상 저장되는지 확인해보세요.`);
-}
-
-// 이력 조회 시 아카이브 포함 (조회 전용)
-function getAllLogsIncludingArchive() {
-  let archive = [];
-  try { archive = JSON.parse(localStorage.getItem(STORE_KEY_LOG_ARCHIVE) || '[]'); } catch(e) {}
-  return archive.length ? archive.concat(logs) : logs;
+  setTimeout(() => {
+    const failed = window._pendingSave && window._pendingSave[STORE_KEY_LOG];
+    if (el) {
+      el.innerHTML = failed
+        ? `<span style="color:var(--danger)">❌ 아직 한도를 넘습니다 (${(after/1024).toFixed(0)} KB). 추가 조치가 필요합니다.</span>`
+        : `<span style="color:var(--accent)">✅ 저장 완료 — ${(before/1024).toFixed(0)} KB → ${(after/1024).toFixed(0)} KB</span>`;
+    }
+    checkDataSize();
+    if (!failed) {
+      const bar = document.getElementById('saveFailBar'); if (bar) bar.remove();
+      alert('✅ 압축 저장 완료\n\n이제 생산 입력이 정상 저장되는지 확인해보세요.\n이력은 하나도 지워지지 않았습니다.');
+    }
+  }, 2500);
 }
 
 // ══════ 저장 실패 경고 (조용한 실패 방지) ══════
