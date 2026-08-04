@@ -404,6 +404,7 @@ const FS_KEYS = [
   'gasims_analysis_v1','gasims_incoming_v1','gasims_orders_v1',
   'gasims_users_v1','gasims_monthly_closing_v1','gasims_daily_closing_v1',
   'gasims_log_archive_v1',
+  'gasims_signatures_v1',
 ];
 
 // 리스너는 앱 초기화 완료 후 등록 (window.gasImsReady 이벤트 대기)
@@ -3797,6 +3798,11 @@ window.onFsUpdate = function(key, val) {
     case 'gasims_log_archive_v1':
       localStorage.setItem('gasims_log_archive_v1', JSON.stringify(val));
       break;
+    case STORE_KEY_SIGS:
+      // 서명(도장)은 성적서 발행에 쓰이므로 기기 간 공유되어야 한다
+      signatures = val;
+      if (typeof renderSigList === 'function') renderSigList();
+      break;
     case STORE_KEY_LOG:
       logs = val;
       { let ch=false; logs.forEach(it=>{ if(migrateMixGasItem(it)) ch=true; }); if(ch) save(STORE_KEY_LOG,logs); }
@@ -4836,6 +4842,37 @@ function confirmPmix() {
   }
 }
 
+// 농도 정보가 없는 혼합가스인지 판단 (예: "H₂+Ar" — 공병 각인 성분만 등록된 품목)
+function isMixWithoutPct(gas) {
+  return !!gas && typeof gas === 'string' && !gas.startsWith('혼합')
+      && gas.includes('+') && !gas.includes('%');
+}
+
+// 생산 화면에 농도 미지정 경고 표시
+function updateProdMixWarn() {
+  const gas = document.getElementById('prodGas')?.value || '';
+  let box = document.getElementById('prodMixWarn');
+  if (!box) {
+    const anchor = document.getElementById('prodGas')?.closest('.field') || document.getElementById('prodGas')?.parentElement;
+    if (!anchor) return;
+    box = document.createElement('div');
+    box.id = 'prodMixWarn';
+    box.style.cssText = 'display:none;margin-top:6px;padding:8px 12px;background:rgba(210,153,34,.12);' +
+      'border:1px solid var(--warn);border-radius:6px;font-size:11px;color:var(--warn);line-height:1.6';
+    anchor.appendChild(box);
+  }
+  if (isMixWithoutPct(gas)) {
+    box.style.display = 'block';
+    box.innerHTML = `⚠️ <strong>농도가 지정되지 않은 혼합가스입니다.</strong><br>
+      "${gas}"는 공병 각인 성분만 등록된 품목이라 농도 정보가 없습니다.
+      이대로 생산하면 성적서에도 농도 없이 표기됩니다.<br>
+      <button class="btn btn-sm" style="margin-top:5px;background:var(--warn);color:#161b22;border:none;font-size:11px;padding:3px 10px"
+        onclick="openPmixModal('prodGas')">🧪 농도 지정하기</button>`;
+  } else {
+    box.style.display = 'none';
+  }
+}
+
 function onProdGasChange() {
   const gas = document.getElementById('prodGas').value;
 
@@ -4844,6 +4881,8 @@ function onProdGasChange() {
     openPmixModal('prodGas');
     return;
   }
+
+  updateProdMixWarn();
 
   // 규격: 기초재고 규격 + 가스 타입별 전체 목록 합집합 (항상 전부 표시)
   const invSizes = [...new Set(inventory.filter(r => r.gas === gas).map(r => r.size))];
@@ -5261,6 +5300,17 @@ function saveProd() {
     .filter(Boolean);
 
   if (!containers.length) { alert('용기번호를 1개 이상 입력해주세요.'); return; }
+
+  // 농도 없는 혼합가스로 저장하려는 경우 한 번 더 확인
+  if (isMixWithoutPct(gas)) {
+    if (!confirm(
+      `⚠️ "${gas}" 는 농도가 지정되지 않은 혼합가스입니다.\n\n` +
+      `공병 각인 성분만 등록된 품목이라 농도 정보가 없습니다.\n` +
+      `이대로 저장하면 성적서에도 농도 없이 "${gas}" 로 표기됩니다.\n\n` +
+      `그래도 이 품명으로 생산하시겠습니까?\n` +
+      `(취소 후 "🧪 농도 지정하기" 버튼으로 농도를 넣을 수 있습니다)`
+    )) return;
+  }
 
   const count = containers.length;
 
@@ -6111,6 +6161,40 @@ function renderBase() {
       </td>
     </tr>`;
   }).join('');
+}
+
+// 기초재고 품목 수정 — 가스 품목 · 규격 · 업체를 바꾼다
+// (수정 버튼은 있었는데 함수가 없어서 눌러도 아무 반응이 없던 문제)
+function editBaseItem(id) {
+  const r = inventory.find(x => x.id === id);
+  if (!r) { alert('품목을 찾을 수 없습니다.'); return; }
+
+  const newGas = prompt(`가스 품목을 입력하세요.\n\n현재: ${r.gas}`, r.gas);
+  if (newGas === null) return;
+  const newSize = prompt(`규격을 입력하세요.\n\n현재: ${r.size}`, r.size);
+  if (newSize === null) return;
+  const newComp = prompt(`업체를 입력하세요.\n\n현재: ${r.company}`, r.company);
+  if (newComp === null) return;
+
+  const g = newGas.trim(), s = newSize.trim(), c = newComp.trim();
+  if (!g || !s || !c) { alert('가스 품목 · 규격 · 업체를 모두 입력해주세요.'); return; }
+  if (g === r.gas && s === r.size && c === r.company) return;
+
+  const dup = inventory.find(x => x.id !== id && x.gas === g && x.size === s && x.company === c);
+  if (dup) {
+    if (!confirm(`이미 같은 품목이 있습니다.\n\n  ${g} · ${s} · ${c}\n\n두 항목의 재고를 합치시겠습니까?\n(실병 ${r.full}+${dup.full}, 공병 ${r.empty}+${dup.empty})`)) return;
+    dup.full  = (dup.full  || 0) + (r.full  || 0);
+    dup.empty = (dup.empty || 0) + (r.empty || 0);
+    inventory = inventory.filter(x => x.id !== id);
+  } else {
+    if (!confirm(`품목 정보를 변경합니다.\n\n  이전: ${r.gas} · ${r.size} · ${r.company}\n  변경: ${g} · ${s} · ${c}\n\n⚠️ 기존 이력의 품명은 그대로 유지됩니다.\n계속하시겠습니까?`)) return;
+    r.gas = g; r.size = s; r.company = c;
+  }
+
+  save(STORE_KEY_INV, inventory);
+  renderBase();
+  renderDash && renderDash();
+  alert('✅ 품목이 수정되었습니다.');
 }
 
 function updateBaseField(id, field, val, isRack) {
@@ -8888,25 +8972,12 @@ function openCartCertModal(cart, fillDate, filledM3, cylUsed) {
   if (goAnalyze) {
     // 분석 탭으로 이동
     nav('analysis');
+    // 분석 입력 폼을 해당 LOT으로 바로 연다.
+    // (예전에는 존재하지 않는 select 요소를 찾아 아무 동작도 하지 않았음)
     setTimeout(() => {
-      // LOT 선택
-      const lotSel = document.getElementById('anLotSelect');
-      if (lotSel) {
-        // 새 LOT 옵션 추가 후 선택
-        let found = false;
-        for (const opt of lotSel.options) {
-          if (opt.value === lotNo) { found = true; break; }
-        }
-        if (!found) {
-          const newOpt = document.createElement('option');
-          newOpt.value = lotNo;
-          newOpt.textContent = lotNo;
-          lotSel.appendChild(newOpt);
-        }
-        lotSel.value = lotNo;
-        if (typeof onAnLotSelect === 'function') onAnLotSelect();
-      }
-    }, 200);
+      if (typeof openAnForm === 'function') openAnForm(lotNo);
+      else alert(`분석 탭에서 LOT ${lotNo} 을(를) 선택해 분석치를 입력해주세요.`);
+    }, 250);
   } else {
     // 즉시 발행 — items의 value를 spec과 동일하게 설정 (충족 시뮬레이션)
     entry.items = entry.items.map(item => ({
@@ -13322,7 +13393,9 @@ function renderAdminLog() {
       <td style="font-size:12px">${l.gas||'—'}</td>
       <td style="font-family:var(--mono);font-size:11px">${l.size||'—'}</td>
       <td style="font-size:12px">${l.company||'—'}</td>
-      <td class="num ${tcls}">${logQtyText(l.dFull)}</td>
+      <td class="num ${tcls}">${(l.dFull == null || l.dFull === 0) && l.dEmpty
+            ? `<span style="color:var(--teal)">${logQtyText(l.dEmpty)}<span style="font-size:9px;color:var(--text3)"> 공병</span></span>`
+            : logQtyText(l.dFull)}</td>
       <td style="font-size:11px;color:var(--text3)">${l.memo||''}</td>
     </tr>`;
   }).join('');
