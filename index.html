@@ -317,77 +317,39 @@ window.fsEstimateSize = function(v) {
 //  용기 항목의 size/company는 대부분 LOT 값과 같고, no는 순서로 알 수 있어
 //  이 셋을 빼면 저장 용량이 절반 이하로 줄어든다.
 // ══════════════════════════════════════════════════════════════
-// 이력 종류별 기본 이름표 — type만 있으면 알 수 있으므로 저장하지 않는다
-const _LOG_TYPE_LABEL = { produce:'생산', ship:'출고', adjust:'조정', incoming:'공병입고' };
-
-// 저장(전송) 직전에 군더더기를 덜어낸다.
-//  · 비어 있는 값(memo:'', lotNo:'', cylinders:[], containers:[], cooldown:[])은 아예 빼고
-//  · type으로 알 수 있는 typeLabel도 빼고
-//  · 0인 증감값(dFull/dEmpty)도 빼고
-//  · 용기 항목의 긴 필드명은 한 글자로 줄인다 (container→c, pAfter→p ...)
-//  빠진 값은 _expandLogsAfterLoad가 전부 되돌리므로 화면은 달라지지 않는다.
 function _compactLogsForSave(arr) {
   if (!Array.isArray(arr)) return arr;
   return arr.map(l => {
-    if (!l || typeof l !== 'object') return l;
-    const out = {};
-    for (const k in l) {
-      const v = l[k];
-      if (v === undefined || v === null) continue;                       // 빈 값
-      if (Array.isArray(v) && v.length === 0) continue;                  // 빈 배열
-      if (v === '' && (k === 'memo' || k === 'lotNo')) continue;         // 빈 메모/LOT
-      if ((k === 'dFull' || k === 'dEmpty') && v === 0) continue;        // 증감 0
-      if (k === 'typeLabel' && v === _LOG_TYPE_LABEL[l.type]) continue;  // 기본 이름표
-      if (k === 'containers') continue;                                  // 아래에서 따로
-      out[k] = v;
-    }
-    if (Array.isArray(l.containers) && l.containers.length) {
-      out.containers = l.containers.map((c, i) => {
-        if (typeof c === 'string') return c;
-        if (!c || typeof c !== 'object') return c;
-        const s = {};
-        if (c.container != null && c.container !== '') s.c = c.container;
-        if (c.no != null && c.no !== i + 1)            s.i = c.no;   // 순번이 다를 때만
-        if (c.size && c.size !== l.size)               s.s = c.size; // LOT과 다를 때만
-        if (c.company && c.company !== l.company)      s.m = c.company;
-        if (c.pAfter != null)                          s.p = c.pAfter;
-        if (c.note)                                    s.n = c.note;
-        return s;
-      });
-    }
+    if (!l || !Array.isArray(l.containers) || !l.containers.length) return l;
+    const out = { ...l };
+    out.containers = l.containers.map((c, i) => {
+      if (typeof c === 'string') return c;
+      const s = {};
+      if (c.container != null) s.container = c.container;
+      if (c.no != null && c.no !== i + 1) s.no = c.no;              // 순번이 다를 때만
+      if (c.size && c.size !== l.size) s.size = c.size;              // LOT과 다를 때만
+      if (c.company && c.company !== l.company) s.company = c.company;
+      if (c.pAfter != null) s.pAfter = c.pAfter;
+      if (c.note) s.note = c.note;                                   // 비어있지 않을 때만
+      return s;
+    });
     return out;
   });
 }
 
-// 불러온 뒤 원래 모습으로 되돌린다.
-//  예전 방식으로 저장된 데이터(긴 필드명)와 새 방식(짧은 필드명)을 모두 알아본다.
 function _expandLogsAfterLoad(arr) {
   if (!Array.isArray(arr)) return arr;
   arr.forEach(l => {
-    if (!l || typeof l !== 'object') return;
-    if (l.typeLabel == null) l.typeLabel = _LOG_TYPE_LABEL[l.type] || l.type || '';
-    if (l.memo   == null) l.memo   = '';
-    if (l.lotNo  == null) l.lotNo  = '';
-    if (l.dFull  == null) l.dFull  = 0;
-    if (l.dEmpty == null) l.dEmpty = 0;
-    if (!Array.isArray(l.containers)) return;
+    if (!l || !Array.isArray(l.containers)) return;
     l.containers = l.containers.map((c, i) => {
       if (typeof c === 'string') return { no: i + 1, container: c, size: l.size, company: l.company, pAfter: null, note: '' };
-      if (!c || typeof c !== 'object') return c;
-      // 짧은 이름(신규) 우선, 없으면 긴 이름(기존)
-      const cont = c.c !== undefined ? c.c : c.container;
-      const cNo  = c.i !== undefined ? c.i : c.no;
-      const cSz  = c.s !== undefined ? c.s : c.size;
-      const cCo  = c.m !== undefined ? c.m : c.company;
-      const cPa  = c.p !== undefined ? c.p : c.pAfter;
-      const cNt  = c.n !== undefined ? c.n : c.note;
       return {
-        no:        cNo != null ? cNo : i + 1,
-        container: cont,
-        size:      cSz != null ? cSz : l.size,
-        company:   cCo != null ? cCo : l.company,
-        pAfter:    cPa != null ? cPa : null,
-        note:      cNt != null ? cNt : ''
+        no:      c.no != null ? c.no : i + 1,
+        container: c.container,
+        size:    c.size    != null ? c.size    : l.size,
+        company: c.company != null ? c.company : l.company,
+        pAfter:  c.pAfter  != null ? c.pAfter  : null,
+        note:    c.note    != null ? c.note    : ''
       };
     });
   });
@@ -2918,7 +2880,7 @@ console.log('✅ Firebase 초기화 완료');
     <!-- 이력 삭제 -->
     <div class="card" style="margin-bottom:16px">
       <div class="sec-h">이력 삭제</div>
-      <div class="alert alert-warn" style="margin-bottom:14px">삭제된 이력은 복구할 수 없습니다. 재고 수량은 자동으로 되돌아가지 않으니 주의하세요.</div>
+      <div class="alert alert-warn" style="margin-bottom:14px">삭제된 이력은 복구할 수 없습니다. <strong>실병·공병 재고는 삭제 전 상태로 자동 복원</strong>되며, 삭제 전 확인창에서 복원될 수량을 미리 보여드립니다.<br><span style="font-size:11px">단, 생산 이력 삭제 시 차감됐던 원재료(He·N₂ 등)는 자동 복원되지 않습니다.</span></div>
 
       <!-- 필터 -->
       <div class="flex-gap" style="margin-bottom:12px;flex-wrap:wrap;gap:8px">
@@ -3449,18 +3411,11 @@ function _checkDataSizeRun() {
     ['원재료',               STORE_KEY_RAW,      rawMaterials],
   ];
   const rows = targets.map(([label, key, data]) => {
-    let size = 0, raw = 0;
-    try {
-      raw = window.fsEstimateSize(data || []);
-      // 이력은 압축해서 보내므로, 실제 서버에 저장되는 크기로 판정해야 한다.
-      // (예전에는 압축 전 크기로 계산해 멀쩡한데도 '한도 초과'로 표시됐다)
-      size = (key === STORE_KEY_LOG)
-        ? window.fsEstimateSize(_compactLogsForSave(data || []))
-        : raw;
-    } catch(e) {}
+    let size = 0;
+    try { size = window.fsEstimateSize(data || []); } catch(e) {}
     const pct = size / LIMIT * 100;
     const cnt = Array.isArray(data) ? data.length : '—';
-    return { label, key, size, raw, pct, cnt };
+    return { label, key, size, pct, cnt };
   }).sort((a,b) => b.size - a.size);
 
   const over = rows.filter(r => r.pct >= 100);
@@ -3468,17 +3423,14 @@ function _checkDataSizeRun() {
 
   document.getElementById('dataSizeResult').innerHTML = `
     <div class="tbl-wrap"><table>
-      <thead><tr><th>데이터</th><th class="num">건수</th><th class="num">실제 저장 크기</th><th class="num">한도 대비</th><th>상태</th></tr></thead>
+      <thead><tr><th>데이터</th><th class="num">건수</th><th class="num">크기</th><th class="num">한도 대비</th><th>상태</th></tr></thead>
       <tbody>${rows.map(r => {
         const color = r.pct >= 100 ? 'var(--danger)' : r.pct >= 85 ? 'var(--warn)' : 'var(--accent)';
         const st    = r.pct >= 100 ? '❌ 한도 초과 — 저장 불가' : r.pct >= 85 ? '⚠️ 한도 임박' : '✅ 정상';
         return `<tr>
           <td>${r.label}</td>
           <td class="num" style="font-family:var(--mono);color:var(--text3)">${r.cnt}</td>
-          <td class="num" style="font-family:var(--mono)">${(r.size/1024).toFixed(0)} KB${
-            r.raw && r.raw > r.size * 1.02
-              ? `<br><span style="font-size:10px;color:var(--text3);font-weight:400">원본 ${(r.raw/1024).toFixed(0)} KB</span>`
-              : ''}</td>
+          <td class="num" style="font-family:var(--mono)">${(r.size/1024).toFixed(0)} KB</td>
           <td class="num" style="font-family:var(--mono);color:${color};font-weight:700">${r.pct.toFixed(1)}%</td>
           <td style="color:${color};font-size:11px;font-weight:700">${st}</td>
         </tr>`;
@@ -13101,12 +13053,60 @@ function updateAdminSelCount() {
 function deleteSelectedLogs() {
   const ids = [...document.querySelectorAll('.ad-chk:checked')].map(c => c.dataset.id);
   if (!ids.length) { alert('삭제할 이력을 선택해주세요.'); return; }
-  if (!confirm(`선택한 ${ids.length}건의 이력을 삭제하시겠습니까?\n⚠️ 재고 수량은 자동으로 되돌아가지 않습니다.`)) return;
+
+  const targets = logs.filter(l => ids.includes(l.id));
+  if (!targets.length) { alert('선택한 이력을 찾을 수 없습니다.'); return; }
+
+  // ── 삭제 시 되돌릴 재고 변동을 품목별로 미리 계산 ──
+  // (예전에는 이력만 지우고 재고는 그대로여서, 잘못 등록한 출고를 지워도
+  //  재고가 복구되지 않아 다시 출고 입력을 할 수 없었음)
+  const revert = {};   // key: gas|size|company → { gas, size, company, full, empty }
+  targets.forEach(l => {
+    const key = `${l.gas}|${l.size}|${l.company}`;
+    if (!revert[key]) revert[key] = { gas: l.gas, size: l.size, company: l.company, full: 0, empty: 0 };
+    revert[key].full  -= (l.dFull  || 0);   // 저장 시 더한 만큼 빼면 원래대로
+    revert[key].empty -= (l.dEmpty || 0);
+  });
+  const revertList = Object.values(revert).filter(r => r.full !== 0 || r.empty !== 0);
+
+  const hasProduce = targets.some(l => l.type === 'produce');
+  const summary = revertList.length
+    ? '\n\n[재고 자동 복원]\n' + revertList.map(r =>
+        `  ${r.gas} · ${r.size} · ${r.company}\n` +
+        `     실병 ${r.full >= 0 ? '+' : ''}${r.full} / 공병 ${r.empty >= 0 ? '+' : ''}${r.empty}`
+      ).join('\n')
+    : '\n\n(재고 변동 없는 이력입니다)';
+
+  const warn = hasProduce
+    ? '\n\n⚠️ 생산 이력이 포함되어 있습니다.\n   실병·공병 재고는 복원되지만, 생산 시 차감된 원재료(He·N₂ 등)는\n   자동으로 복원되지 않습니다. 원재료 입고로 직접 조정해주세요.'
+    : '';
+
+  if (!confirm(`선택한 ${ids.length}건의 이력을 삭제합니다.${summary}${warn}\n\n계속하시겠습니까?`)) return;
+
+  // 재고 복원
+  let created = 0;
+  revertList.forEach(r => {
+    let inv = inventory.find(x => x.gas === r.gas && x.size === r.size && x.company === r.company);
+    if (!inv) {
+      // 재고 항목이 없으면 만들어서 복원 (항목이 지워졌던 경우 대비)
+      inv = { id: uid(), gas: r.gas, size: r.size, company: r.company, dinoCode: '', full: 0, empty: 0, liter: null };
+      inventory.push(inv);
+      created++;
+    }
+    inv.full  = (inv.full  || 0) + r.full;
+    inv.empty = (inv.empty || 0) + r.empty;
+  });
+
   logs = logs.filter(l => !ids.includes(l.id));
+  if (window._invalidateCylCache) window._invalidateCylCache();
+  save(STORE_KEY_INV, inventory);
   save(STORE_KEY_LOG, logs);
+
   renderAdminLog();
-  renderDash();
-  alert(`✅ ${ids.length}건 삭제 완료`);
+  renderAll && renderAll();
+  alert(`✅ ${ids.length}건 삭제 완료${revertList.length ? '\n재고가 삭제 전 상태로 복원되었습니다.' : ''}` +
+        `${created ? `\n(재고 항목 ${created}개를 새로 만들어 복원했습니다)` : ''}` +
+        `${hasProduce ? '\n\n⚠️ 원재료는 복원되지 않았습니다. 직접 확인해주세요.' : ''}`);
 }
 
 function exportBackup() {
