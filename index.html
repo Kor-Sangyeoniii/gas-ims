@@ -3547,8 +3547,11 @@ function checkCylData() {
                               company: l.company, bad, total: (l.cylinders || []).length });
     });
 
-    if (!prodBad.length && !shipBad.length) {
-      el.innerHTML = '<span style="color:var(--accent)">✅ 잘못된 용기번호가 없습니다.</span>';
+    // 형식이 불완전한 이력 (유형 이름·수량 정보 누락)
+    const fmtBad = logs.filter(l => !l.typeLabel || l.dFull == null);
+
+    if (!prodBad.length && !shipBad.length && !fmtBad.length) {
+      el.innerHTML = '<span style="color:var(--accent)">✅ 문제가 발견되지 않았습니다.</span>';
       return;
     }
 
@@ -3592,8 +3595,70 @@ function checkCylData() {
         </div>
       </div>`;
     }
+    if (fmtBad.length) {
+      const noQty = fmtBad.filter(l => l.dFull == null).length;
+      html += `<div style="margin-top:12px">
+        <div style="font-size:12px;font-weight:700;color:var(--warn);margin-bottom:6px">
+          ⚠️ 형식이 불완전한 이력 ${fmtBad.length}건</div>
+        <div style="font-size:11px;color:var(--text3);line-height:1.6;margin-bottom:8px">
+          유형 이름이 없어 <code>undefined</code>로 표시되던 이력입니다.
+          ${noQty ? `이 중 ${noQty}건은 수량 정보(실병 증감)도 없습니다.` : ''}<br>
+          유형 이름은 <strong>이력 종류로 자동 보완</strong>할 수 있습니다.
+          ${noQty ? '수량 정보는 복원할 근거가 없어 <strong>0으로 두고 표시만 정리</strong>합니다. (재고에는 영향 없음)' : ''}
+        </div>
+        <button class="btn btn-sm btn-primary" onclick="repairLogFormat()">🩹 형식 보완</button>
+        <button class="btn btn-sm" style="margin-left:6px;background:var(--bg4);border:1px solid var(--border2);color:var(--text2)" onclick="showBrokenLogRaw()">🔍 실제 내용 보기</button>
+        <div id="brokenLogRaw" style="display:none;margin-top:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:10px;max-height:260px;overflow:auto">
+          <div style="font-size:11px;color:var(--text3);margin-bottom:6px">문제 이력 3건의 실제 저장 내용입니다. 이 화면을 캡처해서 전달해주세요.</div>
+          <pre id="brokenLogRawPre" style="font-family:var(--mono);font-size:10px;color:var(--text2);white-space:pre-wrap;margin:0"></pre>
+        </div>
+      </div>`;
+    }
     el.innerHTML = html;
   }, 30);
+}
+
+// 문제 이력의 실제 저장 내용을 보여준다 (원인 파악용)
+function showBrokenLogRaw() {
+  const bad = logs.filter(l => !l.typeLabel || l.dFull == null).slice(0, 3);
+  const box = document.getElementById('brokenLogRaw');
+  const pre = document.getElementById('brokenLogRawPre');
+  if (!bad.length) { alert('문제 이력이 없습니다.'); return; }
+  // 용기 목록은 길어서 앞 2개만
+  const trimmed = bad.map(l => {
+    const o = { ...l };
+    if (Array.isArray(o.containers)) o.containers = o.containers.slice(0, 2).concat(o.containers.length > 2 ? [`...외 ${o.containers.length-2}개`] : []);
+    if (Array.isArray(o.cylinders))  o.cylinders  = o.cylinders.slice(0, 3).concat(o.cylinders.length > 3 ? [`...외 ${o.cylinders.length-3}개`] : []);
+    return o;
+  });
+  pre.textContent = JSON.stringify(trimmed, null, 2);
+  box.style.display = 'block';
+}
+
+// 유형 이름이 빠진 이력을 보완 (표시만 정리 — 재고·수량은 건드리지 않음)
+function repairLogFormat() {
+  const targets = logs.filter(l => !l.typeLabel || l.dFull == null);
+  if (!targets.length) { alert('보완할 이력이 없습니다.'); return; }
+  const noLabel = targets.filter(l => !l.typeLabel).length;
+  const noQty   = targets.filter(l => l.dFull == null).length;
+
+  if (!confirm(
+    `이력 ${targets.length}건의 형식을 보완합니다.\n\n` +
+    `· 유형 이름 보완 : ${noLabel}건 (이력 종류로 자동 설정)\n` +
+    `· 수량 0으로 설정 : ${noQty}건\n\n` +
+    `⚠️ 재고 수량은 전혀 바뀌지 않습니다. 화면 표시만 정리됩니다.\n` +
+    `계속하시겠습니까?`
+  )) return;
+
+  targets.forEach(l => {
+    if (!l.typeLabel) l.typeLabel = logTypeLabel(l);
+    if (l.dFull  == null) l.dFull  = 0;
+    if (l.dEmpty == null) l.dEmpty = 0;
+  });
+  save(STORE_KEY_LOG, logs);
+  checkCylData();
+  renderAdminLog();
+  alert(`✅ ${targets.length}건 보완 완료`);
 }
 
 // 출고 이력에 저장된 잘못된 용기번호 값을 제거
@@ -6545,7 +6610,7 @@ function renderTodayLog() {
     const eSign = l.dEmpty >= 0 ? '+' : '';
     return `<div class="log-row">
       <span class="log-time">${l.time.split(' ')[1] || l.time}</span>
-      <span class="log-type"><span class="tag ${l.type==='produce'?'tag-full':l.type==='ship'?'tag-empty':'tag-gas'}">${l.typeLabel}</span></span>
+      <span class="log-type"><span class="tag ${l.type==='produce'?'tag-full':l.type==='ship'?'tag-empty':'tag-gas'}">${logTypeLabel(l)}</span></span>
       <span class="log-msg">${l.gas} ${l.size} · ${l.company}${l.memo?' · '+l.memo:''}</span>
       <span class="log-qty ${cls}">실병 ${fSign}${l.dFull} / 공병 ${eSign}${l.dEmpty}</span>
     </div>`;
@@ -7111,7 +7176,7 @@ function renderHist() {
 
     return `<tr>
       <td style="font-family:var(--mono);font-size:12px">${l.date}</td>
-      <td><span class="tag ${l.type==='produce'?'tag-full':l.type==='ship'?'tag-empty':'tag-gas'}">${l.typeLabel}</span></td>
+      <td><span class="tag ${l.type==='produce'?'tag-full':l.type==='ship'?'tag-empty':'tag-gas'}">${logTypeLabel(l)}</span></td>
       <td>${l.gas}</td>
       <td style="font-family:var(--mono);font-size:12px">${l.size}</td>
       <td>${l.company}</td>
@@ -7368,6 +7433,22 @@ function calcProductionConsumption(gas, sizeL, fillBar, qty) {
 // 용기 항목에서 번호만 안전하게 꺼낸다.
 // 저장 형태가 문자열/숫자/객체로 제각각이라 예전 코드는 번호가 비면 객체를 그대로
 // 반환해 화면에 [object Object] 가 찍히는 문제가 있었다.
+// 이력의 유형 이름 — 예전 형식이나 복원된 데이터에 typeLabel이 없을 수 있어 보완한다
+const LOG_TYPE_LABELS = {
+  produce:'생산', ship:'출고', adjust:'조정', incoming:'공병입고',
+  raw_in:'원재료입고', raw_consume:'원재료소모', raw_return:'원재료반납', fill:'충전', out:'출고', ret:'반납'
+};
+function logTypeLabel(l) {
+  if (!l) return '—';
+  if (l.typeLabel) return l.typeLabel;
+  return LOG_TYPE_LABELS[l.type] || l.type || '기타';
+}
+// 수량 표시 — 값이 없으면 물음표 대신 '—'
+function logQtyText(v) {
+  if (v == null || isNaN(v)) return '—';
+  return (v >= 0 ? '+' : '') + v;
+}
+
 function cylNoOf(c) {
   if (c == null) return '';
   if (typeof c === 'string') return c.trim();
@@ -13227,21 +13308,21 @@ function renderAdminLog() {
     return;
   }
   tbody.innerHTML = rows.map(l => {
-    const fSign  = l.dFull >= 0 ? '+' : '';
     const tcls   = l.type==='produce' ? 'type-prod' : l.type==='ship' ? 'type-out' : 'type-adj';
     const tagCls = l.type==='produce' ? 'tag-full'  : l.type==='ship' ? 'tag-empty' : 'tag-gas';
+    const broken = !l.typeLabel || l.dFull == null;
     return `<tr>
       <td style="text-align:center;padding:6px">
         <input type="checkbox" class="ad-chk" data-id="${l.id}"
           style="width:14px;height:14px" onchange="updateAdminSelCount()">
       </td>
-      <td style="font-family:var(--mono);font-size:11px">${l.date} ${(l.time||'').split(' ')[1]||''}</td>
-      <td><span class="tag ${tagCls}">${l.typeLabel}</span></td>
+      <td style="font-family:var(--mono);font-size:11px">${l.date||'—'} ${(l.time||'').split(' ')[1]||''}</td>
+      <td><span class="tag ${tagCls}">${logTypeLabel(l)}</span>${broken ? '<span title="형식이 불완전한 이력" style="margin-left:4px;color:var(--warn)">⚠️</span>' : ''}</td>
       <td style="font-family:var(--mono);font-size:11px;color:var(--accent)">${l.lotNo||'—'}</td>
-      <td style="font-size:12px">${l.gas}</td>
-      <td style="font-family:var(--mono);font-size:11px">${l.size}</td>
-      <td style="font-size:12px">${l.company}</td>
-      <td class="num ${tcls}">${fSign}${l.dFull}</td>
+      <td style="font-size:12px">${l.gas||'—'}</td>
+      <td style="font-family:var(--mono);font-size:11px">${l.size||'—'}</td>
+      <td style="font-size:12px">${l.company||'—'}</td>
+      <td class="num ${tcls}">${logQtyText(l.dFull)}</td>
       <td style="font-size:11px;color:var(--text3)">${l.memo||''}</td>
     </tr>`;
   }).join('');
