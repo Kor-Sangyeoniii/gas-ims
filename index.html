@@ -3053,6 +3053,16 @@ console.log('✅ Firebase 초기화 완료');
       </div>
 
       <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:14px">
+        <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:8px">🏷 가스 품명 일괄 변경</div>
+        <div style="font-size:12px;color:var(--text2);line-height:1.6;margin-bottom:10px">
+          농도가 빠진 혼합가스 품명(예: <code>CO₂+Ar</code>)을 정확한 품명(<code>5%CO₂+Ar</code>)으로
+          <strong>재고 · 생산이력 · 출고이력 · 분석/성적서 전체에서 한 번에</strong> 바꿉니다.
+        </div>
+        <button class="btn btn-primary" onclick="scanMixNoPct()">🔍 농도 없는 혼합가스 찾기</button>
+        <div id="mixNoPctResult" style="font-size:12px;margin-top:10px"></div>
+      </div>
+
+      <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:14px">
         <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:8px">🔧 용기번호 점검</div>
         <div style="font-size:12px;color:var(--text2);line-height:1.6;margin-bottom:10px">
           용기번호가 비어 있거나 <code>[object Object]</code> 같은 잘못된 값으로 저장된 이력을 찾습니다.
@@ -3518,6 +3528,101 @@ function restoreArchivedLogs() {
     renderAll && renderAll();
     if (!failed) alert(`✅ ${add.length}건을 되돌렸습니다.\n이제 예전 이력도 조회·수정이 가능합니다.`);
   }, 2500);
+}
+
+// ══════ 농도 없는 혼합가스 품명 찾기 · 일괄 변경 ══════
+function scanMixNoPct() {
+  const el = document.getElementById('mixNoPctResult');
+  el.innerHTML = '<span style="color:var(--text3)">⏳ 검사 중...</span>';
+
+  setTimeout(() => {
+    // 품명별로 어디에 몇 건 쓰이는지 집계
+    const stat = {};
+    const bump = (gas, field) => {
+      if (!isMixWithoutPct(gas)) return;
+      if (!stat[gas]) stat[gas] = { inv:0, prod:0, ship:0, an:0, etc:0 };
+      stat[gas][field]++;
+    };
+    inventory.forEach(r => bump(r.gas, 'inv'));
+    logs.forEach(l => bump(l.gas, l.type === 'produce' ? 'prod' : l.type === 'ship' ? 'ship' : 'etc'));
+    analysisData.forEach(a => bump(a.gas, 'an'));
+
+    const names = Object.keys(stat).sort();
+    if (!names.length) {
+      el.innerHTML = '<span style="color:var(--accent)">✅ 농도 없는 혼합가스 품명이 없습니다.</span>';
+      return;
+    }
+
+    el.innerHTML = `
+      <div class="tbl-wrap" style="max-height:240px"><table>
+        <thead><tr><th>현재 품명</th><th class="num">재고</th><th class="num">생산</th><th class="num">출고</th><th class="num">분석</th><th style="width:190px">바꿀 품명</th><th style="width:70px">적용</th></tr></thead>
+        <tbody>${names.map((g,i) => `<tr>
+          <td style="font-family:var(--mono);font-size:12px;color:var(--warn);font-weight:700">${g}</td>
+          <td class="num" style="font-family:var(--mono);color:var(--text3)">${stat[g].inv}</td>
+          <td class="num" style="font-family:var(--mono);color:var(--text3)">${stat[g].prod}</td>
+          <td class="num" style="font-family:var(--mono);color:var(--text3)">${stat[g].ship}</td>
+          <td class="num" style="font-family:var(--mono);color:var(--text3)">${stat[g].an}</td>
+          <td><input type="text" id="mixRename${i}" placeholder="예: 5%${g}" value=""
+                style="width:100%;font-family:var(--mono);font-size:12px"></td>
+          <td><button class="btn btn-sm btn-success" style="padding:2px 8px;font-size:11px"
+                onclick="applyGasRename('${g.replace(/'/g,"\\'")}', document.getElementById('mixRename${i}').value)">변경</button></td>
+        </tr>`).join('')}</tbody>
+      </table></div>
+      <div style="font-size:11px;color:var(--text3);margin-top:6px">
+        💡 바꿀 품명을 입력하고 <strong>변경</strong>을 누르면 재고·이력·분석 전체에서 해당 품명이 교체됩니다.
+        같은 품명이 이미 있으면 재고를 합칩니다.
+      </div>`;
+  }, 30);
+}
+
+// 가스 품명을 전체 데이터에서 일괄 변경
+function applyGasRename(oldGas, newGasRaw) {
+  const newGas = (newGasRaw || '').trim();
+  if (!newGas) { alert('바꿀 품명을 입력해주세요.'); return; }
+  if (newGas === oldGas) { alert('현재 품명과 같습니다.'); return; }
+
+  const cInv  = inventory.filter(r => r.gas === oldGas).length;
+  const cProd = logs.filter(l => l.gas === oldGas && l.type === 'produce').length;
+  const cShip = logs.filter(l => l.gas === oldGas && l.type === 'ship').length;
+  const cEtc  = logs.filter(l => l.gas === oldGas && l.type !== 'produce' && l.type !== 'ship').length;
+  const cAn   = analysisData.filter(a => a.gas === oldGas).length;
+  const total = cInv + cProd + cShip + cEtc + cAn;
+  if (!total) { alert('해당 품명을 쓰는 데이터가 없습니다.'); return; }
+
+  if (!confirm(
+    `가스 품명을 일괄 변경합니다.\n\n` +
+    `  "${oldGas}"  →  "${newGas}"\n\n` +
+    `  재고 ${cInv}건 · 생산 ${cProd}건 · 출고 ${cShip}건 · 기타이력 ${cEtc}건 · 분석 ${cAn}건\n` +
+    `  (총 ${total}건)\n\n` +
+    `⚠️ 되돌릴 수 없습니다. 백업은 받으셨나요?`
+  )) return;
+
+  // 재고 — 같은 조합이 이미 있으면 합친다
+  const merged = [];
+  inventory.filter(r => r.gas === oldGas).forEach(r => {
+    const dup = inventory.find(x => x !== r && x.gas === newGas && x.size === r.size && x.company === r.company);
+    if (dup) {
+      dup.full  = (dup.full  || 0) + (r.full  || 0);
+      dup.empty = (dup.empty || 0) + (r.empty || 0);
+      merged.push(r.id);
+    } else {
+      r.gas = newGas;
+    }
+  });
+  if (merged.length) inventory = inventory.filter(r => !merged.includes(r.id));
+
+  logs.forEach(l => { if (l.gas === oldGas) l.gas = newGas; });
+  analysisData.forEach(a => { if (a.gas === oldGas) a.gas = newGas; });
+
+  if (window._invalidateCylCache) window._invalidateCylCache();
+  save(STORE_KEY_INV, inventory);
+  save(STORE_KEY_LOG, logs);
+  save(STORE_KEY_ANALYSIS, analysisData);
+
+  scanMixNoPct();
+  renderAll && renderAll();
+  alert(`✅ ${total}건 변경 완료\n\n  "${oldGas}" → "${newGas}"` +
+        `${merged.length ? `\n(재고 ${merged.length}건은 기존 품목과 합쳤습니다)` : ''}`);
 }
 
 // ══════ 용기번호 점검 · 복구 ══════
@@ -4280,7 +4385,10 @@ function onBSizeChange() {
 
 function isMixGas(gasName) {
   if (!gasName) return false;
-  return gasName.startsWith('혼합') || (gasName.includes('%') && gasName.includes('+'));
+  // '+' 로 성분이 이어지면 혼합가스로 본다.
+  // (예전에는 '%'가 있어야만 혼합으로 판정해서, 공병 각인 성분만 등록된
+  //  "CO₂+Ar" 같은 품목이 단일가스로 취급되어 혼합가스 편집이 불가능했음)
+  return gasName.startsWith('혼합') || gasName.includes('+');
 }
 
 function addMixRow() {
@@ -5450,7 +5558,7 @@ function openProdEdit(logId) {
   // 혼합가스면 ✏️ 조성 편집 버튼 표시
   const editBtn = document.getElementById('peEditMixBtn');
   if (editBtn) {
-    editBtn.style.display = (log.gas || '').startsWith('혼합') ? 'inline-block' : 'none';
+    editBtn.style.display = isMixGas(log.gas || '') ? 'inline-block' : 'none';
   }
 
   // ── 규격 드롭다운 (가스 기준)
@@ -5486,7 +5594,7 @@ function onPeGasChange() {
 
   // 혼합가스면 ✏️ 조성 편집 버튼 표시
   if (editBtn) {
-    editBtn.style.display = gas.startsWith('혼합') ? 'inline-block' : 'none';
+    editBtn.style.display = isMixGas(gas) ? 'inline-block' : 'none';
   }
 
   populatePeSizeOptions(gas);
@@ -5496,7 +5604,7 @@ function onPeGasChange() {
 function editPeMixGas() {
   const peGas = document.getElementById('peGas');
   const currentGas = peGas.value;
-  if (!currentGas.startsWith('혼합')) return;
+  if (!isMixGas(currentGas)) return;
   openPmixModal('peGas', currentGas);
 }
 
@@ -10262,7 +10370,7 @@ function openAnInfoEdit() {
   // 혼합가스면 ✏️ 조성 버튼 표시
   const editBtn = document.getElementById('anEditMixBtn');
   if (editBtn) {
-    editBtn.style.display = (currentAnLog.gas || '').startsWith('혼합') ? 'inline-block' : 'none';
+    editBtn.style.display = isMixGas(currentAnLog.gas || '') ? 'inline-block' : 'none';
   }
 
   // 규격 드롭다운
@@ -10296,7 +10404,7 @@ function onAnEditGasChange() {
   }
 
   if (editBtn) {
-    editBtn.style.display = gas.startsWith('혼합') ? 'inline-block' : 'none';
+    editBtn.style.display = isMixGas(gas) ? 'inline-block' : 'none';
   }
   populateAnEditSize(gas);
 }
@@ -10304,7 +10412,7 @@ function onAnEditGasChange() {
 function editAnMixGas() {
   const gasSel = document.getElementById('anEditGas');
   const currentGas = gasSel.value;
-  if (!currentGas.startsWith('혼합')) return;
+  if (!isMixGas(currentGas)) return;
   openPmixModal('anEditGas', currentGas);
 }
 
