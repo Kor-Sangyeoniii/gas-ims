@@ -119,7 +119,12 @@
   .divider { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
 
   /* ── Alert ── */
-  .alert { padding: 10px 14px; border-radius: 8px; font-size: 12px; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+  /* display:flex 였을 때 <strong>·<br> 이 섞이면 각 조각이 가로로 늘어서
+     글자가 세로로 눌리는 문제가 있어 일반 블록으로 바꿨다. */
+  .alert { padding: 10px 14px; border-radius: 8px; font-size: 12px; margin-bottom: 12px; line-height: 1.7; }
+  .alert > strong { font-weight: 700; }
+  /* 아이콘 등을 가로로 배치해야 하는 경우에만 사용 */
+  .alert-row { display: flex; align-items: center; gap: 8px; }
   .alert-info { background: rgba(31,111,235,.12); border: 1px solid rgba(31,111,235,.3); color: #79b8ff; }
   .alert-warn { background: rgba(210,153,34,.12); border: 1px solid rgba(210,153,34,.3); color: var(--warn); }
 
@@ -177,7 +182,9 @@ window.fsSave = async function(key, val) {
   window._pendingSave[key] = true;
 
   // 이력은 서버로 보낼 때만 중복 필드를 뺀다 (화면 데이터는 그대로 유지)
-  const sendVal = (key === 'gasims_log_v2') ? _compactLogsForSave(val) : val;
+  // ⚠️ 압축 기능은 용기번호를 빈 객체로 만드는 버그가 있어 사용하지 않는다.
+  //    (2026-08 사고: 6~7월 생산 이력의 용기번호가 {} 로 뭉개짐)
+  const sendVal = val;
 
   // ⚠️ Firestore 문서 크기 한도(1 MiB) 사전 검사
   //    초과하면 서버가 400으로 거부하므로, 미리 감지해 명확히 알린다.
@@ -317,24 +324,11 @@ window.fsEstimateSize = function(v) {
 //  용기 항목의 size/company는 대부분 LOT 값과 같고, no는 순서로 알 수 있어
 //  이 셋을 빼면 저장 용량이 절반 이하로 줄어든다.
 // ══════════════════════════════════════════════════════════════
+// ⚠️ 사용 중지된 함수 — 용기번호를 잃는 버그가 있었다.
+//    container 값이 없는 항목을 빈 객체 {} 로 만들어, 한 번 뭉개지면 되살릴 수 없었다.
+//    호출부는 모두 제거했으며, 예전 데이터 호환을 위해 정의만 남긴다.
 function _compactLogsForSave(arr) {
-  if (!Array.isArray(arr)) return arr;
-  return arr.map(l => {
-    if (!l || !Array.isArray(l.containers) || !l.containers.length) return l;
-    const out = { ...l };
-    out.containers = l.containers.map((c, i) => {
-      if (typeof c === 'string') return c;
-      const s = {};
-      if (c.container != null) s.container = c.container;
-      if (c.no != null && c.no !== i + 1) s.no = c.no;              // 순번이 다를 때만
-      if (c.size && c.size !== l.size) s.size = c.size;              // LOT과 다를 때만
-      if (c.company && c.company !== l.company) s.company = c.company;
-      if (c.pAfter != null) s.pAfter = c.pAfter;
-      if (c.note) s.note = c.note;                                   // 비어있지 않을 때만
-      return s;
-    });
-    return out;
-  });
+  return arr;   // 아무것도 하지 않는다
 }
 
 function _expandLogsAfterLoad(arr) {
@@ -343,14 +337,15 @@ function _expandLogsAfterLoad(arr) {
     if (!l || !Array.isArray(l.containers)) return;
     l.containers = l.containers.map((c, i) => {
       if (typeof c === 'string') return { no: i + 1, container: c, size: l.size, company: l.company, pAfter: null, note: '' };
-      return {
-        no:      c.no != null ? c.no : i + 1,
-        container: c.container,
-        size:    c.size    != null ? c.size    : l.size,
-        company: c.company != null ? c.company : l.company,
-        pAfter:  c.pAfter  != null ? c.pAfter  : null,
-        note:    c.note    != null ? c.note    : ''
-      };
+      if (!c || typeof c !== 'object') return c;
+      // 원본에 있는 값은 그대로 두고, 없는 것만 LOT 값으로 채운다
+      const o = { ...c };
+      if (o.no == null)      o.no = i + 1;
+      if (o.size == null)    o.size = l.size;
+      if (o.company == null) o.company = l.company;
+      if (o.pAfter === undefined) o.pAfter = null;
+      if (o.note === undefined)   o.note = '';
+      return o;
     });
   });
   return arr;
@@ -629,7 +624,7 @@ console.log('✅ Firebase 초기화 완료');
 
 <nav class="nav">
   <button class="nav-btn active" onclick="nav('dash')">📊 현황 대시보드</button>
-  <button class="nav-btn" onclick="nav('base')">⚙️ 기초재고 설정</button>
+
   <button class="nav-btn" onclick="nav('prod')">🏭 일일 생산 입력</button>
   <button class="nav-btn" onclick="nav('cart')">🔧 카트리지 충전</button>
   <button class="nav-btn" onclick="nav('incoming')">📥 공병 입고</button>
@@ -638,6 +633,7 @@ console.log('✅ Firebase 초기화 완료');
   <button class="nav-btn" onclick="nav('analysis')">🔬 분석 / 성적서</button>
   <button class="nav-btn" onclick="nav('closing')">📋 일일 마감</button>
   <button class="nav-btn" onclick="nav('hist')">🗂 이력 조회</button>
+  <button class="nav-btn" onclick="nav('bulk')">📤 엑셀 일괄 등록</button>
   <button class="nav-btn" onclick="nav('admin')" style="color:var(--danger)">🔐 관리자</button>
 </nav>
 
@@ -786,7 +782,11 @@ console.log('✅ Firebase 초기화 완료');
 
 <!-- ══════════════ BASE ══════════════ -->
 <div class="page" id="page-base">
-  <div class="alert alert-info">기초재고를 설정하면 모든 생산/출고 계산의 기준이 됩니다. 엑셀 양식을 다운받아 작성 후 업로드하거나, 아래 폼으로 직접 추가하세요.</div>
+  <div class="alert alert-warn" style="line-height:1.7">
+    <strong>⚠️ 품목 관리 화면입니다.</strong> 실제 재고는 <strong>생산·출고·입고 이력</strong>으로 자동 계산됩니다.<br>
+    여기서 수량을 직접 고치면 <strong>이력과 재고가 어긋납니다.</strong> 품목(가스·규격·업체) 추가·수정 용도로만 사용하세요.<br>
+    <span style="font-size:11px">※ 운영 시작 시점의 재고는 <strong>일일 마감</strong>에서 실사값을 입력해 맞춥니다.</span>
+  </div>
 
   <!-- 엑셀 업로드 카드 -->
   <div class="card" style="border-color: rgba(46,164,164,.4)">
@@ -1041,6 +1041,17 @@ console.log('✅ Firebase 초기화 완료');
           <option value="tank">ISO Tank</option>
           <option value="cart">카트리지</option>
         </select>
+      </div>
+      <!-- 사용할 공병 선택 (각인이 맞는 공병 중에서) -->
+      <div class="field" id="prodEmptySrcField" style="display:none;grid-column:1/-1">
+        <label>사용할 공병 <span style="color:var(--text3);font-size:10px;font-weight:400">(각인이 맞는 공병에서 차감합니다)</span></label>
+        <select id="prodEmptySrc" style="width:100%;font-size:12px" onchange="renderProdEmptySrc()"></select>
+        <div id="prodEmptySrcInfo" style="font-size:11px;color:var(--text3);margin-top:4px"></div>
+      </div>
+      <!-- 실린더 원재료 등급 선택 (H₂·O₂·CO₂ 성분이 들어간 가스일 때만) -->
+      <div class="field" id="prodCylSrcField" style="display:none;grid-column:1/-1">
+        <label>실린더 원재료 선택 <span style="color:var(--text3);font-size:10px;font-weight:400">(어느 재고에서 차감할지)</span></label>
+        <div id="prodCylSrcRows" style="display:flex;gap:10px;flex-wrap:wrap"></div>
       </div>
       <!-- 원재료 탱크 선택 (He ISO Tank / N2 / Ar 일 때만) -->
       <div class="field" id="prodHeTankField" style="display:none">
@@ -1812,7 +1823,10 @@ console.log('✅ Firebase 초기화 완료');
   <div class="card" id="incMixCard" style="display:none">
     <div class="sec-h">혼합가스 공병 입고</div>
     <div class="alert alert-warn" style="margin-bottom:14px">
-      용기에 각인된 성분명만 선택하세요. 농도는 입력하지 않아도 됩니다. 이 성분 조합으로 혼합가스를 충전할 수 있는 공병으로 등록됩니다.
+      용기에 <strong>각인된 성분명만</strong> 선택하세요. 농도는 입력하지 않습니다.<br>
+      · 각인이 <strong>1개</strong>면 단일가스 공병으로 등록됩니다. (예: N₂)<br>
+      · 각인이 <strong>2개 이상</strong>이면 <strong>혼합가스 전용 공병</strong>으로 등록됩니다. (예: 각인 [Ar/CH₄])<br>
+      <span style="font-size:11px">※ 혼합 전용 공병에는 단일가스를 충전할 수 없습니다. 각인 성분으로 만든 혼합가스만 충전됩니다.</span>
     </div>
     <div id="incMixRows">
       <!-- 동적 생성 -->
@@ -1876,7 +1890,11 @@ console.log('✅ Firebase 초기화 완료');
 
 <!-- ══════════════ ORDER ══════════════ -->
 <div class="page" id="page-order">
-  <div class="alert alert-info">발주를 입력하면 재고 현황을 바탕으로 납품 가능 여부를 즉시 확인할 수 있습니다.</div>
+  <div class="alert alert-info" style="line-height:1.7">
+    발주를 입력하면 재고를 바탕으로 납품 가능 여부를 바로 확인합니다.<br>
+    실병이 모자라도 <strong>각인이 맞는 공병</strong>이 있으면 <strong style="color:var(--accent)">생산 가능</strong>으로,
+    해당 업체 공병이 없고 자가병만 있으면 <strong style="color:var(--warn)">자가병으로 생산 가능</strong>으로 표시됩니다.
+  </div>
 
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start">
 
@@ -2434,11 +2452,14 @@ console.log('✅ Firebase 초기화 완료');
     <div style="display:grid;grid-template-columns:1.2fr 1fr auto;gap:10px;align-items:end;margin-bottom:12px">
       <div class="field" style="margin-bottom:0">
         <label>납품 업체 <span style="color:var(--danger)">*</span></label>
-        <select id="batchCertComp" style="width:100%" onchange="batchCertSearch()"></select>
+        <select id="batchCertComp" style="width:100%" onchange="onBatchCertCompChange()"></select>
       </div>
       <div class="field" style="margin-bottom:0">
         <label>출고일</label>
-        <input type="date" id="batchCertDate" style="width:100%" onchange="batchCertSearch()">
+        <div style="display:flex;gap:6px">
+          <select id="batchCertDateSel" style="flex:1" onchange="onBatchCertDateSel()"></select>
+          <input type="date" id="batchCertDate" style="width:150px" onchange="batchCertSearch()">
+        </div>
       </div>
       <button class="btn btn-primary" onclick="batchCertSearch()">조회</button>
     </div>
@@ -2684,6 +2705,44 @@ console.log('✅ Firebase 초기화 완료');
 </div>
 
 <!-- ══════════════ ADMIN ══════════════ -->
+<div class="page" id="page-bulk">
+  <div class="alert alert-info" style="line-height:1.7">
+    인터넷이 끊기거나 여러 건을 한 번에 넣어야 할 때 사용합니다.<br>
+    <strong>① 양식 다운로드 → ② 엑셀에 작성 → ③ 업로드 → ④ 확인 후 반영</strong> 순서입니다.
+    반영 전에 내용을 먼저 보여드리므로, 잘못된 줄이 있으면 그때 취소하시면 됩니다.
+  </div>
+
+  <div class="card">
+    <div class="sec-h">① 양식 다운로드</div>
+    <div style="font-size:12px;color:var(--text3);margin-bottom:12px">필요한 양식을 받아 엑셀에서 작성하세요. 파란 안내 줄은 지우지 마세요.</div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
+      <button class="btn btn-success" onclick="downloadBulkTemplate('produce')">🏭 생산 입력 양식</button>
+      <button class="btn btn-success" onclick="downloadBulkTemplate('ship')">📦 출고 양식</button>
+      <button class="btn btn-success" onclick="downloadBulkTemplate('incoming')">📥 공병 입고 양식</button>
+      <button class="btn btn-success" onclick="downloadBulkTemplate('adjust')">± 재고 조정 양식</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="sec-h">② 작성한 엑셀 올리기</div>
+    <div class="flex-gap" style="gap:10px;flex-wrap:wrap;align-items:center">
+      <input type="file" id="bulkFile" accept=".xlsx" style="font-size:12px">
+      <button class="btn btn-primary" onclick="readBulkFile()">📄 내용 확인</button>
+      <button class="btn" style="background:var(--bg4);border:1px solid var(--border2);color:var(--text2)" onclick="resetBulk()">↻ 초기화</button>
+    </div>
+    <div id="bulkMsg" style="font-size:12px;color:var(--text3);margin-top:10px;font-family:var(--mono)"></div>
+  </div>
+
+  <div class="card" id="bulkPreviewCard" style="display:none">
+    <div class="sec-h">③ 내용 확인</div>
+    <div id="bulkPreview" style="font-size:12px"></div>
+    <div class="flex-end" style="gap:8px;margin-top:14px">
+      <button class="btn" style="background:var(--bg3);border:1px solid var(--border);color:var(--text2)" onclick="resetBulk()">취소</button>
+      <button class="btn btn-success" id="bulkApplyBtn" onclick="applyBulk()">✅ 확인하고 반영</button>
+    </div>
+  </div>
+</div>
+
 <div class="page" id="page-admin">
 
   <!-- 비밀번호 잠금 -->
@@ -3060,6 +3119,110 @@ console.log('✅ Firebase 초기화 완료');
       </div>
 
       <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:14px">
+        <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:8px">🛢 저장탱크 레벨 ↔ 잔량 환산</div>
+        <div style="font-size:12px;color:var(--text2);line-height:1.6;margin-bottom:10px">
+          레벨(mmAq)을 넣으면 잔량(kg)을, 잔량을 넣으면 레벨을 알려줍니다.
+          <span style="color:var(--text3);font-size:11px">표에 없는 값은 앞뒤 값 사이로 계산합니다.</span>
+        </div>
+        <div class="flex-gap" style="gap:8px;flex-wrap:wrap;align-items:end">
+          <div class="field" style="margin-bottom:0">
+            <label>탱크</label>
+            <select id="lvCalcKey" style="width:150px" onchange="calcTankLv()">
+              <option value="N2">질소 (12,270L)</option>
+              <option value="Ar">아르곤 (9,446L)</option>
+            </select>
+          </div>
+          <div class="field" style="margin-bottom:0">
+            <label>레벨 (mmAq)</label>
+            <input type="number" id="lvCalcMm" style="width:120px" oninput="calcTankLv('mm')" placeholder="예: 2500">
+          </div>
+          <div class="field" style="margin-bottom:0">
+            <label>잔량 (kg)</label>
+            <input type="number" id="lvCalcKg" style="width:120px" oninput="calcTankLv('kg')" placeholder="예: 5000">
+          </div>
+        </div>
+        <div id="lvCalcInfo" style="font-size:12px;margin-top:10px;color:var(--text3)"></div>
+      </div>
+
+      <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:14px">
+        <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:8px">⚗️ 1병당 소모 kg 설정 (BOM)</div>
+        <div style="font-size:12px;color:var(--text2);line-height:1.6;margin-bottom:10px">
+          <strong>47L · 130bar 용기 1병을 채울 때 쓰는 원재료 kg</strong> 입니다.
+          생산 시 이 값으로 원재료를 차감합니다.<br>
+          용량·압력이 다르면 자동으로 비례 계산합니다.
+          <span style="color:var(--warn)">현장 실측값으로 맞춰주세요.</span>
+        </div>
+        <div id="bomKgRows" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px"></div>
+        <div class="flex-gap" style="gap:8px">
+          <button class="btn btn-success" onclick="saveBomKg()">💾 저장</button>
+          <button class="btn" style="background:var(--bg4);border:1px solid var(--border2);color:var(--text2)" onclick="resetBomKg()">↻ 기본값</button>
+        </div>
+        <div id="bomKgMsg" style="font-size:12px;margin-top:8px"></div>
+      </div>
+
+      <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:14px">
+        <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:8px">📦 품목 관리 (기초재고)</div>
+        <div style="font-size:12px;color:var(--text2);line-height:1.6;margin-bottom:10px">
+          가스 품목·규격·업체를 추가하거나 수정합니다.
+          <strong style="color:var(--warn)">수량을 직접 고치면 이력과 어긋나므로</strong> 품목 관리 용도로만 사용하세요.
+        </div>
+        <button class="btn" style="background:var(--bg4);border:1px solid var(--border2);color:var(--text2)" onclick="nav('base')">📦 품목 관리 열기</button>
+      </div>
+
+      <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:14px">
+        <div style="font-size:12px;font-weight:700;color:var(--accent2);margin-bottom:8px">🎯 재고 기준일 셋팅</div>
+        <div style="font-size:12px;color:var(--text2);line-height:1.7;margin-bottom:12px">
+          운영 시작일의 <strong>실사 재고</strong>를 입력해 기준을 맞춥니다.<br>
+          <strong style="color:var(--accent)">기준일까지의 이력은 재고 계산에서 제외</strong>되고, 입력한 실사값이 그대로 재고가 됩니다.<br>
+          <strong>기준일 다음날부터</strong>의 생산·출고·입고만 재고에 반영됩니다.<br>
+          <span style="font-size:11px;color:var(--text3)">
+            ※ 이전 이력은 <strong>성적서 발행·이력 조회용으로 그대로 보존</strong>됩니다. 지워지지 않습니다.<br>
+            ※ 지금 공병 수량이 안 맞아도 괜찮습니다. 실사값을 넣으면 그게 재고가 됩니다.
+          </span>
+          <div id="stockBaseNow" style="margin-top:8px;font-size:12px"></div>
+        </div>
+        <div class="flex-gap" style="gap:8px;flex-wrap:wrap;align-items:end;margin-bottom:12px">
+          <div class="field" style="margin-bottom:0">
+            <label>기준일</label>
+            <input type="date" id="stockSetDate" style="width:160px">
+          </div>
+          <button class="btn btn-primary" onclick="openStockSetup()">📋 재고 입력표 열기</button>
+          <button class="btn btn-sm" style="background:var(--bg4);border:1px solid var(--border2);color:var(--text2)" onclick="downloadStockSetupTemplate()">📥 엑셀 양식</button>
+        </div>
+        <div id="stockSetupBox" style="display:none">
+          <div class="flex-gap" style="gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+            <input type="text" id="stockSetFilter" placeholder="가스·업체 검색" style="width:200px;font-size:12px" oninput="renderStockSetup()">
+            <label style="font-size:11px;color:var(--text2);display:flex;align-items:center;gap:4px;cursor:pointer">
+              <input type="checkbox" id="stockSetHideZero" onchange="renderStockSetup()"> 수량 0 숨기기
+            </label>
+            <span style="flex:1"></span>
+            <button class="btn btn-sm" style="background:var(--bg4);border:1px solid var(--border2);color:var(--text2)" onclick="addStockSetupRow()">+ 품목 추가</button>
+          </div>
+          <div id="stockSetupRows"></div>
+          <div class="flex-end" style="gap:8px;margin-top:12px">
+            <button class="btn" style="background:var(--bg3);border:1px solid var(--border);color:var(--text2)" onclick="document.getElementById('stockSetupBox').style.display='none'">닫기</button>
+            <button class="btn btn-success" onclick="applyStockSetup()">✅ 이 값으로 재고 확정</button>
+          </div>
+        </div>
+      </div>
+
+      <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:14px">
+        <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:8px">⚖️ 재고 ↔ 이력 대조</div>
+        <div style="font-size:12px;color:var(--text2);line-height:1.6;margin-bottom:10px">
+          현재 재고 수량과 <strong>이력을 모두 더한 값</strong>이 일치하는지 확인합니다.<br>
+          차이가 나면 이력 없이 재고만 바뀐 것이 있다는 뜻입니다. (기초재고 설정, 직접 수정 등)
+        </div>
+        <div class="flex-gap" style="gap:8px;flex-wrap:wrap;align-items:end;margin-bottom:10px">
+          <div class="field" style="margin-bottom:0">
+            <label>기준일 <span style="color:var(--text3);font-size:10px;font-weight:400">(이 날짜부터의 이력만 합산)</span></label>
+            <input type="date" id="stockAuditFrom" style="width:160px">
+          </div>
+          <button class="btn btn-primary" onclick="auditStockVsLogs()">⚖️ 대조하기</button>
+        </div>
+        <div id="stockAuditResult" style="font-size:12px"></div>
+      </div>
+
+      <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:14px">
         <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:8px">🏷 가스 품명 일괄 변경</div>
         <div style="font-size:12px;color:var(--text2);line-height:1.6;margin-bottom:10px">
           농도가 빠진 혼합가스 품명(예: <code>CO₂+Ar</code>)을 정확한 품명(<code>5%CO₂+Ar</code>)으로
@@ -3067,6 +3230,44 @@ console.log('✅ Firebase 초기화 완료');
         </div>
         <button class="btn btn-primary" onclick="scanMixNoPct()">🔍 농도 없는 혼합가스 찾기</button>
         <div id="mixNoPctResult" style="font-size:12px;margin-top:10px"></div>
+      </div>
+
+      <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:14px">
+        <div style="font-size:12px;font-weight:700;color:var(--danger);margin-bottom:8px">🚨 용기번호 유실 진단</div>
+        <div style="font-size:12px;color:var(--text2);line-height:1.7;margin-bottom:10px">
+          <strong>Firebase 서버의 원본 데이터를 직접 읽어</strong> 용기번호가 실제로 어떻게 저장돼 있는지 확인합니다.<br>
+          화면에 보이는 값이 아니라 <strong>서버에 저장된 그대로</strong>를 보여줍니다.
+        </div>
+        <button class="btn btn-danger" onclick="diagnoseCylLoss()">🚨 서버 원본 확인</button>
+        <div id="cylLossResult" style="font-size:12px;margin-top:10px"></div>
+      </div>
+
+      <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:14px">
+        <div style="font-size:12px;font-weight:700;color:var(--accent);margin-bottom:8px">🔧 출고 용기번호 복구</div>
+        <div style="font-size:12px;color:var(--text2);line-height:1.7;margin-bottom:10px">
+          출고 이력에 용기번호가 비어 있어도, <strong>생산할 때 입력한 용기번호는 그대로 남아 있습니다.</strong><br>
+          그 LOT의 생산 용기번호에서 <strong>아직 다른 출고에 쓰이지 않은 것</strong>을 찾아 채웁니다.<br>
+          <span style="font-size:11px;color:var(--text3)">※ 채우기 전에 어떤 번호가 들어갈지 먼저 보여드립니다.</span>
+        </div>
+        <button class="btn btn-primary" onclick="scanMissingShipCyls()">🔍 비어 있는 출고 찾기</button>
+        <div id="recoverCylResult" style="font-size:12px;margin-top:10px"></div>
+      </div>
+
+      <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:14px">
+        <div style="font-size:12px;font-weight:700;color:var(--accent2);margin-bottom:8px">🔎 LOT 저장 내용 확인</div>
+        <div style="font-size:12px;color:var(--text2);line-height:1.6;margin-bottom:10px">
+          LOT 번호를 넣으면 <strong>실제로 저장된 내용을 그대로</strong> 보여줍니다.
+          생산·출고·분석 데이터에 용기번호가 어떻게 들어가 있는지 확인할 수 있습니다.
+        </div>
+        <div class="flex-gap" style="gap:8px;flex-wrap:wrap;align-items:end;margin-bottom:10px">
+          <div class="field" style="margin-bottom:0">
+            <label>LOT 번호 (일부만 입력해도 됩니다)</label>
+            <input type="text" id="lotInspectNo" placeholder="예: 260806-6" style="width:240px;font-family:var(--mono)"
+                   onkeydown="if(event.key==='Enter'){event.preventDefault();inspectLot();}">
+          </div>
+          <button class="btn btn-primary" onclick="inspectLot()">🔎 확인</button>
+        </div>
+        <div id="lotInspectResult" style="font-size:12px"></div>
       </div>
 
       <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:14px">
@@ -3086,7 +3287,7 @@ console.log('✅ Firebase 초기화 완료');
           <strong style="color:var(--accent)">데이터를 하나도 지우지 않고</strong> 저장 용량이 절반 이하로 줄어듭니다.<br>
           <strong>모든 이력은 그대로 남아 조회·수정 가능합니다.</strong> 화면에서 달라지는 것은 없습니다.
         </div>
-        <button class="btn btn-success" onclick="compactAndResave()">🗜 압축해서 다시 저장</button>
+        <button class="btn" style="background:var(--bg4);border:1px solid var(--border2);color:var(--text3);cursor:not-allowed" disabled title="용기번호 손상 문제로 사용 중지되었습니다">🗜 압축 저장 (사용 중지)</button>
         <div id="archiveResult" style="font-size:12px;margin-top:8px"></div>
       </div>
     </div>
@@ -3319,6 +3520,34 @@ save(STORE_KEY_RAW, rawMaterials);
 const HE_KG_TO_M3 = 6.03, N2_KG_TO_M3 = 0.799, AR_KG_TO_M3 = 0.561;
 const H2_DENSITY = 0.0838, O2_DENSITY = 1.308;
 const CO2_KG_PER_BTL = 20, CO2_WASTE_KG = 2;
+// 25℃·1atm 기체 밀도 (pvtM3 의 기준 온도와 동일)
+const CO2_DENSITY = 1.799, CH4_DENSITY_G = 0.656;
+
+// ══════════════════════════════════════════════════════════════
+//  1병당 소모 kg (BOM) — 47L · 130bar 기준
+//  m³ 로 환산하지 않고 이 값을 직접 써서 kg 단위로만 계산한다.
+//  값은 관리자 화면에서 현장 실측치로 수정할 수 있다.
+// ══════════════════════════════════════════════════════════════
+const BOM_KG_DEFAULT = {
+  He: 1.029, N2: 7.200, Ar: 10.286,
+  H2: 0.514, O2: 8.229, CO2: 11.315, CH4: 4.115,
+};
+const BOM_BASE_L = 47, BOM_BASE_BAR = 130;
+
+function getBomKg(key) {
+  const t = (rawMaterials && rawMaterials._bomKg) || {};
+  const v = parseFloat(t[key]);
+  return (isFinite(v) && v > 0) ? v : (BOM_KG_DEFAULT[key] || 0);
+}
+
+// 용량·압력이 기준과 다르면 비례 보정
+function bomKgPerCyl(key, sizeL, fillBar) {
+  const base = getBomKg(key);
+  if (!base) return 0;
+  const L = parseFloat(sizeL) || BOM_BASE_L;
+  const P = parseFloat(fillBar) || BOM_BASE_BAR;
+  return base * (L / BOM_BASE_L) * ((P + ATM_KGF) / (BOM_BASE_BAR + ATM_KGF));
+}
 const CYL_VOL_L = 47, CYL_FILL_BAR = 130, CYL_WASTE_BAR = 10, ATM_KGF = 1.033;
 let heDisplayUnit = 'kg';
 
@@ -3512,7 +3741,11 @@ function _checkDataSizeRun() {
 
 // ══════ 아카이브된 이력 되돌리기 ══════
 function getArchivedLogs() {
-  try { return JSON.parse(localStorage.getItem(STORE_KEY_LOG_ARCHIVE) || '[]'); } catch(e) { return []; }
+  try {
+    const arr = JSON.parse(localStorage.getItem(STORE_KEY_LOG_ARCHIVE) || '[]');
+    // 아카이브가 압축된 상태로 저장돼 있을 수 있으므로 복원해서 돌려준다
+    return Array.isArray(arr) ? _expandLogsAfterLoad(arr) : [];
+  } catch(e) { return []; }
 }
 
 // 관리자 화면 진입 시 아카이브 존재 여부를 알린다
@@ -3574,6 +3807,752 @@ function restoreArchivedLogs() {
   }, 2500);
 }
 
+// ══════════════════════════════════════════════════════════════
+//  엑셀 일괄 등록 — 인터넷이 끊기거나 여러 건을 한 번에 넣을 때
+//  ① 양식 다운로드 → ② 작성 → ③ 업로드 → ④ 확인 후 반영
+// ══════════════════════════════════════════════════════════════
+const BULK_SPECS = {
+  produce: {
+    name: '생산 입력',
+    cols: ['생산일자(YYYY-MM-DD)', '가스 품목', '규격', '업체', '용기번호(쉼표로 구분)', '충전압력(bar)', '메모'],
+    guide: '예) 2026-08-10 / Ar — 고순도 / 47L / 동해가스산업 / NK00104,449400,037423 / 130 / (비고)',
+  },
+  ship: {
+    name: '출고',
+    cols: ['출고일자(YYYY-MM-DD)', '가스 품목', '규격', '업체', '출고수량(실병)', '회수 공병수', '용기번호(쉼표, 선택)', '메모'],
+    guide: '예) 2026-08-10 / Ar — 고순도 / 47L / 동해가스산업 / 10 / 10 / NK00104,449400 / (비고)',
+  },
+  incoming: {
+    name: '공병 입고',
+    cols: ['입고일자(YYYY-MM-DD)', '가스 품목', '규격', '업체', '공병수량', '메모'],
+    guide: '예) 2026-08-10 / Ar — 고순도 / 47L / 동해가스산업 / 20 / (비고)',
+  },
+  adjust: {
+    name: '재고 조정',
+    cols: ['조정일자(YYYY-MM-DD)', '가스 품목', '규격', '업체', '실병 증감(+/-)', '공병 증감(+/-)', '사유'],
+    guide: '예) 2026-08-10 / Ar — 고순도 / 47L / 동해가스산업 / -1 / 1 / 파손 폐기',
+  },
+};
+
+let bulkParsed = null;   // { type, rows: [...] }
+
+// ── 양식 다운로드 (엑셀이 여는 최소 xlsx 직접 생성)
+async function downloadBulkTemplate(type) {
+  const spec = BULK_SPECS[type];
+  if (!spec) return;
+  if (typeof JSZip === 'undefined') { alert('압축 라이브러리가 로드되지 않았습니다.'); return; }
+
+  const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  // 1행: 종류 표시(수정 금지) / 2행: 안내 / 3행: 헤더 / 4행부터 입력
+  const sheetRows = [
+    [`[${type}] ${spec.name} 양식 — 이 줄은 지우지 마세요`],
+    [spec.guide],
+    spec.cols,
+  ];
+  let rowsXml = '';
+  sheetRows.forEach((r, ri) => {
+    const cells = r.map((v, ci) => {
+      const col = String.fromCharCode(65 + ci);
+      return `<c r="${col}${ri+1}" t="inlineStr"><is><t>${esc(v)}</t></is></c>`;
+    }).join('');
+    rowsXml += `<row r="${ri+1}">${cells}</row>`;
+  });
+
+  const sheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols><col min="1" max="8" width="22" customWidth="1"/></cols><sheetData>${rowsXml}</sheetData></worksheet>`;
+
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`);
+  zip.file('_rels/.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`);
+  zip.file('xl/workbook.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="입력" sheetId="1" r:id="rId1"/></sheets></workbook>`);
+  zip.file('xl/_rels/workbook.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`);
+  zip.file('xl/worksheets/sheet1.xml', sheet);
+
+  const buf = await zip.generateAsync({ type:'arraybuffer', compression:'DEFLATE' });
+  const blob = new Blob([buf], { type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `${spec.name}_양식.xlsx`;
+  document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1200);
+}
+
+// ── 업로드한 엑셀 읽어 미리보기
+async function readBulkFile() {
+  const f = document.getElementById('bulkFile')?.files?.[0];
+  const msg = document.getElementById('bulkMsg');
+  if (!f) { alert('엑셀 파일을 선택해주세요.'); return; }
+  if (typeof JSZip === 'undefined') { alert('압축 라이브러리가 로드되지 않았습니다.'); return; }
+  msg.textContent = '⏳ 읽는 중...';
+
+  try {
+    const zip = await JSZip.loadAsync(await f.arrayBuffer());
+    // 공유문자열 (<si> 단위로 읽어야 값이 쪼개지지 않음)
+    let ss = [];
+    const ssF = zip.file('xl/sharedStrings.xml');
+    if (ssF) {
+      const x = await ssF.async('string');
+      const un = s => s.replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&apos;/g,"'");
+      ss = [...x.matchAll(/<si(?:\s[^>]*)?>([\s\S]*?)<\/si>/g)]
+        .map(m => [...m[1].matchAll(/<t(?:\s[^>]*)?>([\s\S]*?)<\/t>/g)].map(t => un(t[1])).join(''));
+    }
+    const shF = zip.file('xl/worksheets/sheet1.xml');
+    if (!shF) throw new Error('시트를 찾을 수 없습니다.');
+    const doc = new DOMParser().parseFromString(await shF.async('string'), 'application/xml');
+
+    const grid = [];
+    [...doc.getElementsByTagName('row')].forEach(row => {
+      const r = parseInt(row.getAttribute('r'), 10) - 1;
+      grid[r] = grid[r] || [];
+      [...row.getElementsByTagName('c')].forEach(c => {
+        const ref = c.getAttribute('r') || '';
+        const cs = (ref.match(/^([A-Z]+)/) || [])[1] || '';
+        let ci = 0; for (const ch of cs) ci = ci * 26 + ch.charCodeAt(0) - 64;
+        ci -= 1;
+        const t = c.getAttribute('t') || '';
+        const v = c.getElementsByTagName('v')[0];
+        const is = c.getElementsByTagName('is')[0];
+        let val = '';
+        if (t === 's' && v) val = ss[parseInt(v.textContent, 10)] ?? '';
+        else if (is) val = [...is.getElementsByTagName('t')].map(x => x.textContent).join('');
+        else if (v) val = v.textContent;
+        grid[r][ci] = val;
+      });
+    });
+
+    // 1행에서 양식 종류 판별
+    const head = String(grid[0]?.[0] ?? '');
+    const m = head.match(/^\[(\w+)\]/);
+    if (!m || !BULK_SPECS[m[1]]) throw new Error('양식을 알 수 없습니다. 이 화면에서 받은 양식을 사용해주세요.');
+    const type = m[1];
+
+    // 4행부터 데이터
+    const rows = [];
+    for (let i = 3; i < grid.length; i++) {
+      const g = grid[i] || [];
+      if (!g.some(x => String(x ?? '').trim())) continue;
+      rows.push(g.map(x => String(x ?? '').trim()));
+    }
+    if (!rows.length) throw new Error('입력된 내용이 없습니다. 4행부터 작성해주세요.');
+
+    bulkParsed = { type, rows: rows.map((r, i) => validateBulkRow(type, r, i + 4)) };
+    renderBulkPreview();
+    msg.textContent = `✅ ${BULK_SPECS[type].name} · ${rows.length}건 읽음`;
+  } catch (e) {
+    console.error(e);
+    msg.textContent = '❌ ' + (e.message || e);
+    document.getElementById('bulkPreviewCard').style.display = 'none';
+    bulkParsed = null;
+  }
+}
+
+// 한 줄 검증
+function validateBulkRow(type, r, lineNo) {
+  const err = [];
+  const date = normBulkDate(r[0]);
+  if (!date) err.push('날짜 형식 오류');
+  const gas = r[1], size = r[2], comp = r[3];
+  if (!gas)  err.push('가스 품목 없음');
+  if (!size) err.push('규격 없음');
+  if (!comp) err.push('업체 없음');
+
+  const o = { lineNo, date, gas, size, company: comp, err };
+  if (type === 'produce') {
+    o.containers = (r[4] || '').split(/[,\s]+/).map(s => s.trim()).filter(Boolean);
+    o.bar  = parseFloat(r[5]) || CYL_FILL_BAR;
+    o.memo = r[6] || '';
+    if (!o.containers.length) err.push('용기번호 없음');
+  } else if (type === 'ship') {
+    o.full  = parseInt(r[4], 10);
+    o.empty = parseInt(r[5], 10) || 0;
+    o.containers = (r[6] || '').split(/[,\s]+/).map(s => s.trim()).filter(Boolean);
+    o.memo  = r[7] || '';
+    if (!(o.full > 0)) err.push('출고수량 오류');
+  } else if (type === 'incoming') {
+    o.empty = parseInt(r[4], 10);
+    o.memo  = r[5] || '';
+    if (!(o.empty > 0)) err.push('공병수량 오류');
+  } else if (type === 'adjust') {
+    o.dFull  = parseInt(r[4], 10) || 0;
+    o.dEmpty = parseInt(r[5], 10) || 0;
+    o.memo   = r[6] || '';
+    if (o.dFull === 0 && o.dEmpty === 0) err.push('증감값 없음');
+  }
+  return o;
+}
+
+function normBulkDate(v) {
+  if (!v) return '';
+  const s = String(v).trim();
+  let m = s.match(/^(\d{4})[-.\/](\d{1,2})[-.\/](\d{1,2})$/);
+  if (m) return `${m[1]}-${String(m[2]).padStart(2,'0')}-${String(m[3]).padStart(2,'0')}`;
+  // 엑셀 날짜 일련번호
+  const n = Number(s);
+  if (!isNaN(n) && n > 20000 && n < 80000) {
+    const d = new Date(Date.UTC(1899, 11, 30) + Math.round(n) * 86400000);
+    return d.toISOString().slice(0, 10);
+  }
+  return '';
+}
+
+function renderBulkPreview() {
+  const card = document.getElementById('bulkPreviewCard');
+  const box  = document.getElementById('bulkPreview');
+  if (!bulkParsed) { card.style.display = 'none'; return; }
+  const { type, rows } = bulkParsed;
+  const bad = rows.filter(r => r.err.length);
+
+  const cols = {
+    produce:  ['날짜','가스','규격','업체','용기수','충전압','메모'],
+    ship:     ['날짜','가스','규격','업체','실병','공병','용기수','메모'],
+    incoming: ['날짜','가스','규격','업체','공병','메모'],
+    adjust:   ['날짜','가스','규격','업체','실병증감','공병증감','사유'],
+  }[type];
+
+  const cellOf = r => ({
+    produce:  [r.date, r.gas, r.size, r.company, r.containers?.length ?? 0, r.bar, r.memo],
+    ship:     [r.date, r.gas, r.size, r.company, r.full, r.empty, r.containers?.length ?? 0, r.memo],
+    incoming: [r.date, r.gas, r.size, r.company, r.empty, r.memo],
+    adjust:   [r.date, r.gas, r.size, r.company, r.dFull, r.dEmpty, r.memo],
+  }[type]);
+
+  box.innerHTML = `
+    <div style="margin-bottom:8px">
+      <strong>${BULK_SPECS[type].name}</strong> · 총 ${rows.length}건
+      ${bad.length ? `<span style="color:var(--danger);font-weight:700"> · 오류 ${bad.length}건 (반영에서 제외됩니다)</span>`
+                   : '<span style="color:var(--accent)"> · 오류 없음</span>'}
+    </div>
+    <div class="tbl-wrap" style="max-height:320px"><table>
+      <thead><tr><th style="width:44px">줄</th>${cols.map(c => `<th>${c}</th>`).join('')}<th>확인</th></tr></thead>
+      <tbody>${rows.map(r => `<tr${r.err.length ? ' style="background:rgba(248,81,73,.08)"' : ''}>
+        <td style="font-family:var(--mono);color:var(--text3)">${r.lineNo}</td>
+        ${cellOf(r).map(v => `<td style="font-size:11px">${v ?? ''}</td>`).join('')}
+        <td style="font-size:11px;color:${r.err.length ? 'var(--danger)' : 'var(--accent)'}">${r.err.length ? r.err.join(', ') : '✓'}</td>
+      </tr>`).join('')}</tbody>
+    </table></div>`;
+  card.style.display = 'block';
+  const btn = document.getElementById('bulkApplyBtn');
+  const okCnt = rows.length - bad.length;
+  btn.textContent = `✅ 확인하고 반영 (${okCnt}건)`;
+  btn.disabled = okCnt === 0;
+  btn.style.opacity = okCnt === 0 ? '.4' : '1';
+}
+
+function resetBulk() {
+  bulkParsed = null;
+  const f = document.getElementById('bulkFile'); if (f) f.value = '';
+  document.getElementById('bulkPreviewCard').style.display = 'none';
+  document.getElementById('bulkMsg').textContent = '';
+}
+
+// ── 확인 후 실제 반영 (재고 + 이력)
+function applyBulk() {
+  if (!bulkParsed) return;
+  const { type, rows } = bulkParsed;
+  const ok = rows.filter(r => !r.err.length);
+  if (!ok.length) { alert('반영할 수 있는 줄이 없습니다.'); return; }
+
+  // 새로 만들어야 할 품목 확인
+  const willCreate = [];
+  ok.forEach(r => {
+    const key = `${r.gas}|${r.size}|${r.company}`;
+    if (!inventory.find(x => x.gas === r.gas && x.size === r.size && x.company === r.company)
+        && !willCreate.includes(key)) willCreate.push(key);
+  });
+
+  if (!confirm(
+    `${BULK_SPECS[type].name} ${ok.length}건을 반영합니다.\n` +
+    `${rows.length - ok.length ? `(오류 ${rows.length - ok.length}건은 제외)\n` : ''}` +
+    `${willCreate.length ? `\n새로 만들어질 품목 ${willCreate.length}개:\n  ${willCreate.slice(0,5).join('\n  ')}${willCreate.length>5?'\n  ...':''}\n` : ''}` +
+    `\n⚠️ 되돌리려면 이력에서 해당 건을 삭제해야 합니다.\n계속하시겠습니까?`
+  )) return;
+
+  const getInv = r => {
+    let inv = inventory.find(x => x.gas === r.gas && x.size === r.size && x.company === r.company);
+    if (!inv) {
+      inv = { id: uid(), gas: r.gas, size: r.size, company: r.company, dinoCode:'', full:0, empty:0, liter:null };
+      inventory.push(inv);
+    }
+    return inv;
+  };
+
+  let done = 0;
+  const stamp = now();
+
+  ok.forEach(r => {
+    const inv = getInv(r);
+    if (type === 'produce') {
+      const n = r.containers.length;
+      // 화면 입력과 동일한 규칙으로 LOT 번호 생성 (같은 날·같은 가스면 순번 증가)
+      const yymmdd = r.date.replace(/-/g, '').slice(2);
+      const code   = getLotCode(r.gas);
+      let seq = 1;
+      while (logs.some(l => l.lotNo === `${code} ${yymmdd}-${seq}`)) seq++;
+      const lotNo = `${code} ${yymmdd}-${seq}`;
+      inv.full += n; inv.empty -= n;
+      logs.push({ id: uid(), date: r.date, time: stamp, type:'produce', typeLabel:'생산',
+        gas:r.gas, size:r.size, company:r.company, lotNo,
+        containers: r.containers.map((c,i)=>({ no:i+1, container:c, size:r.size, company:r.company, pAfter:r.bar, note:'' })),
+        dFull:n, dEmpty:-n, cooldown:[], memo:(r.memo||'') + ' [엑셀 일괄]' });
+    } else if (type === 'ship') {
+      const dFull = -r.full;
+      const dEmpty = r.empty > 0 ? r.empty : -r.full;
+      inv.full += dFull; inv.empty += dEmpty;
+      logs.push({ id: uid(), date:r.date, time:stamp, type:'ship', typeLabel:'출고',
+        gas:r.gas, size:r.size, company:r.company, lotNo:'',
+        cylinders: r.containers || [], dFull, dEmpty, memo:(r.memo||'') + ' [엑셀 일괄]' });
+    } else if (type === 'incoming') {
+      inv.empty += r.empty;
+      logs.push({ id: uid(), date:r.date, time:stamp, type:'incoming', typeLabel:'공병입고',
+        gas:r.gas, size:r.size, company:r.company, dFull:0, dEmpty:r.empty,
+        memo:(r.memo||'') + ' [엑셀 일괄]' });
+    } else if (type === 'adjust') {
+      inv.full += r.dFull; inv.empty += r.dEmpty;
+      logs.push({ id: uid(), date:r.date, time:stamp, type:'adjust', typeLabel:'재고조정',
+        gas:r.gas, size:r.size, company:r.company, dFull:r.dFull, dEmpty:r.dEmpty,
+        memo:(r.memo||'') + ' [엑셀 일괄]' });
+    }
+    done++;
+  });
+
+  if (window._invalidateCylCache) window._invalidateCylCache();
+  save(STORE_KEY_INV, inventory);
+  save(STORE_KEY_LOG, logs);
+  resetBulk();
+  renderAll && renderAll();
+  alert(`✅ ${done}건 반영 완료\n\n이력에 [엑셀 일괄] 표시가 붙습니다.\n잘못된 건은 관리자 → 이력에서 삭제하면 재고도 함께 복원됩니다.`);
+}
+
+// ══════════════════════════════════════════════════════════════
+//  저장탱크 레벨(mmAq) → 잔량(kg) 환산표
+//  N₂ : LIQUID NITROGEN STORAGE TANK  WK-07  12,270 L
+//  Ar : LIQUID ARGON STORAGE TANK     ID 02   9,446 L
+//  ※ 표에 없는 값은 앞뒤 값 사이로 계산합니다.
+//  ※ 원본 인쇄본의 N₂ 2,300 / 3,400 mmAq 행은 앞 행보다 값이 작아
+//    (인쇄 오류로 보임) 제외했습니다. 그 구간은 앞뒤로 계산됩니다.
+// ══════════════════════════════════════════════════════════════
+const TANK_LV_CHART = {
+  N2: [[50,15],[100,60],[150,127],[200,213],[250,313],[300,422],[350,535],[400,648],[450,762],[500,875],[550,988],[600,1102],[650,1215],[700,1329],[750,1442],[800,1556],[850,1669],[900,1783],[950,1896],[1000,2010],[1050,2123],[1100,2237],[1150,2350],[1200,2464],[1250,2578],[1300,2691],[1350,2805],[1400,2918],[1450,3032],[1500,3145],[1550,3259],[1600,3372],[1650,3486],[1700,3599],[1750,3712],[1800,3826],[1850,3939],[1900,4053],[1950,4166],[2000,4275],[2050,4393],[2100,4507],[2150,4620],[2200,4734],[2250,4847],[2350,5074],[2400,5187],[2450,5301],[2500,5414],[2550,5528],[2600,5641],[2650,5755],[2700,5869],[2750,5982],[2800,6096],[2850,6209],[2900,6323],[2950,6436],[3000,6550],[3050,6663],[3100,6777],[3150,6890],[3200,7004],[3250,7117],[3300,7231],[3350,7344],[3450,7571],[3500,7685],[3550,7798],[3600,7911],[3650,8025],[3700,8138],[3750,8252],[3800,8365],[3850,8479],[3900,8592],[3950,8706],[4000,8819]],
+  Ar: [[50,9],[100,36],[150,79],[200,136],[250,205],[300,286],[350,376],[400,474],[450,579],[500,688],[550,800],[600,913],[650,1027],[700,1140],[750,1254],[800,1368],[850,1481],[900,1595],[950,1709],[1000,1822],[1050,1936],[1100,2050],[1150,2163],[1200,2277],[1250,2391],[1300,2504],[1350,2618],[1400,2731],[1450,2845],[1500,2959],[1550,3072],[1600,3186],[1650,3300],[1700,3413],[1750,3527],[1800,3641],[1850,3754],[1900,3868],[1950,3982],[2000,4095],[2050,4209],[2100,4323],[2150,4436],[2200,4550],[2250,4663],[2300,4777],[2350,4891],[2400,5004],[2450,5118],[2500,5232],[2550,5345],[2600,5459],[2650,5573],[2700,5686],[2750,5800],[2800,5914],[2850,6027],[2900,6141],[2950,6255],[3000,6368],[3050,6482],[3100,6596],[3150,6709],[3200,6823],[3250,6937],[3300,7050],[3350,7164],[3400,7278],[3450,7391],[3500,7505],[3550,7618],[3600,7732],[3650,7846],[3700,7959],[3750,8073],[3800,8187],[3850,8300],[3900,8414],[3950,8528],[4000,8641],[4050,8755],[4100,8869],[4150,8982],[4200,9096],[4250,9210],[4300,9323],[4350,9437],[4400,9551],[4450,9664],[4500,9778],[4550,9892],[4600,10005],[4650,10119],[4700,10232],[4750,10346],[4800,10460],[4850,10573],[4900,10687],[4950,10801],[5000,10914],[5050,11028],[5100,11142],[5150,11255],[5200,11369],[5250,11483],[5300,11596],[5350,11710],[5400,11824],[5450,11937]],
+};
+const TANK_LV_INFO = {
+  N2: { label:'질소 저장탱크',  model:'WK-07', volumeL:12270, maxBar:9.3 },
+  Ar: { label:'아르곤 저장탱크', model:'ID 02', volumeL:9446,  maxBar:9.5 },
+};
+
+// 레벨(mmAq) → kg  (표 사이값은 비례 계산)
+function tankLvToKg(key, mmAq) {
+  const t = TANK_LV_CHART[key];
+  const v = parseFloat(mmAq);
+  if (!t || !isFinite(v)) return null;
+  if (v <= t[0][0])                 return t[0][1];
+  if (v >= t[t.length-1][0])        return t[t.length-1][1];
+  for (let i = 0; i < t.length - 1; i++) {
+    const [x1,y1] = t[i], [x2,y2] = t[i+1];
+    if (v >= x1 && v <= x2) {
+      if (x2 === x1) return y1;
+      return y1 + (y2 - y1) * (v - x1) / (x2 - x1);
+    }
+  }
+  return null;
+}
+
+// kg → 레벨(mmAq)  (역방향 조회)
+function tankKgToLv(key, kg) {
+  const t = TANK_LV_CHART[key];
+  const v = parseFloat(kg);
+  if (!t || !isFinite(v)) return null;
+  if (v <= t[0][1])          return t[0][0];
+  if (v >= t[t.length-1][1]) return t[t.length-1][0];
+  for (let i = 0; i < t.length - 1; i++) {
+    const [x1,y1] = t[i], [x2,y2] = t[i+1];
+    if (v >= y1 && v <= y2) {
+      if (y2 === y1) return x1;
+      return x1 + (x2 - x1) * (v - y1) / (y2 - y1);
+    }
+  }
+  return null;
+}
+
+// 관리자: 레벨 ↔ 잔량 환산 계산기
+function calcTankLv(from) {
+  const key = document.getElementById('lvCalcKey')?.value || 'N2';
+  const mmEl = document.getElementById('lvCalcMm');
+  const kgEl = document.getElementById('lvCalcKg');
+  const info = document.getElementById('lvCalcInfo');
+  const t = TANK_LV_INFO[key], chart = TANK_LV_CHART[key];
+  if (!t || !chart) return;
+
+  if (from === 'mm' && mmEl.value !== '') {
+    const kg = tankLvToKg(key, mmEl.value);
+    if (kg != null) kgEl.value = kg.toFixed(1);
+  } else if (from === 'kg' && kgEl.value !== '') {
+    const mm = tankKgToLv(key, kgEl.value);
+    if (mm != null) mmEl.value = mm.toFixed(0);
+  }
+
+  const lo = chart[0], hi = chart[chart.length-1];
+  const cur = parseFloat(kgEl.value);
+  const pct = isFinite(cur) && hi[1] ? (cur / hi[1] * 100) : null;
+  info.innerHTML =
+    `<strong>${t.label}</strong> · ${t.model} · 내용적 ${t.volumeL.toLocaleString()}L · 최고충전압 ${t.maxBar}kg/cm²<br>` +
+    `표 범위: ${lo[0]}~${hi[0]} mmAq (${lo[1].toLocaleString()}~${hi[1].toLocaleString()} kg)` +
+    (pct != null ? ` · 현재 <strong style="color:var(--accent)">${pct.toFixed(1)}%</strong>` : '');
+}
+
+// 마감 화면: 레벨(mmAq) 입력 → kg 자동 계산
+function onClosingLv(inp) {
+  const key = inp.dataset.key;
+  const hidden = document.querySelector(`.cl-in[data-cat="tank"][data-key="${key}"]`);
+  const label  = document.querySelector(`.cl-lvkg[data-key="${key}"]`);
+  if (inp.value === '') {
+    if (hidden) hidden.value = '';
+    if (label)  label.textContent = '—';
+  } else {
+    const kg = tankLvToKg(key, inp.value);
+    if (kg != null) {
+      if (hidden) hidden.value = kg.toFixed(2);
+      if (label)  label.textContent = kg.toLocaleString(undefined, { maximumFractionDigits: 1 }) + ' kg';
+      const info = TANK_LV_INFO[key];
+      inp.title = `${info ? info.label + ' · ' : ''}${inp.value} mmAq → ${kg.toFixed(0)} kg`;
+    }
+  }
+  recalcClosing();
+}
+
+// ══════ 1병당 소모 kg (BOM) 설정 ══════
+const BOM_LABELS = { He:'He', N2:'N₂', Ar:'Ar', H2:'H₂', O2:'O₂', CO2:'CO₂', CH4:'CH₄' };
+
+function renderBomKg() {
+  const box = document.getElementById('bomKgRows');
+  if (!box) return;
+  box.innerHTML = Object.keys(BOM_KG_DEFAULT).map(k => `
+    <div style="min-width:130px">
+      <div style="font-size:11px;color:var(--text3);margin-bottom:3px">${BOM_LABELS[k]} (kg/병)</div>
+      <input type="number" step="0.001" min="0" class="bom-kg" data-key="${k}"
+             value="${getBomKg(k)}" style="width:100%;font-family:var(--mono);font-size:12px">
+    </div>`).join('');
+}
+
+function saveBomKg() {
+  const t = {};
+  let bad = [];
+  document.querySelectorAll('.bom-kg').forEach(i => {
+    const v = parseFloat(i.value);
+    if (!isFinite(v) || v <= 0) { bad.push(BOM_LABELS[i.dataset.key]); return; }
+    t[i.dataset.key] = v;
+  });
+  if (bad.length) { alert('값이 잘못되었습니다: ' + bad.join(', ')); return; }
+  rawMaterials._bomKg = t;
+  save(STORE_KEY_RAW, rawMaterials);
+  const el = document.getElementById('bomKgMsg');
+  if (el) el.innerHTML = '<span style="color:var(--accent)">✅ 저장되었습니다. 다음 생산부터 이 값으로 차감됩니다.</span>';
+}
+
+function resetBomKg() {
+  if (!confirm('기본값으로 되돌립니다.\n(47L·130bar 기준 값)\n\n계속하시겠습니까?')) return;
+  delete rawMaterials._bomKg;
+  save(STORE_KEY_RAW, rawMaterials);
+  renderBomKg();
+  const el = document.getElementById('bomKgMsg');
+  if (el) el.innerHTML = '<span style="color:var(--text3)">기본값으로 되돌렸습니다.</span>';
+}
+
+// ══════════════════════════════════════════════════════════════
+//  재고 기준일 셋팅
+//  운영 시작일의 실사 재고를 입력해 기준을 맞춘다.
+//  이력(생산·출고·충전)은 건드리지 않고 재고 수량만 바꾼다.
+// ══════════════════════════════════════════════════════════════
+let stockSetupRows = null;
+
+// 재고 기준일 — 이 날짜의 실사값이 재고의 출발점이다.
+// 이 날짜 이전 이력은 성적서·조회용으로 남지만 재고 계산에는 반영하지 않는다.
+function getStockBaseDate() {
+  try {
+    const v = localStorage.getItem('gasims_stock_base_date');
+    return v || '';
+  } catch(e) { return ''; }
+}
+function setStockBaseDate(d) {
+  try { localStorage.setItem('gasims_stock_base_date', d || ''); } catch(e) {}
+}
+// 기준일 이전 날짜로 입력하려 할 때 확인
+function checkStockBaseDate(date, what) {
+  const base = getStockBaseDate();
+  if (!base || !date || date > base) return true;
+  return confirm(
+    `⚠️ 재고 기준일(${base}) 이전 날짜입니다.\n\n` +
+    `기준일까지의 재고는 실사값으로 확정되어 있어,\n` +
+    `이 날짜로 ${what}을(를) 저장해도 재고 수량은 바뀌지 않습니다.\n` +
+    `(이력·성적서용으로만 남습니다)\n\n` +
+    `그래도 저장하시겠습니까?`
+  );
+}
+
+// 이 이력이 재고에 반영되어야 하는가 (기준일 이후인가)
+function affectsStock(log) {
+  const base = getStockBaseDate();
+  if (!base) return true;
+  return (log.date || '') > base;   // 기준일 당일까지는 실사값에 이미 반영된 것으로 본다
+}
+
+// 현재 설정된 기준일 표시
+function renderStockBaseNow() {
+  const el = document.getElementById('stockBaseNow');
+  if (!el) return;
+  const base = getStockBaseDate();
+  if (!base) {
+    el.innerHTML = '<span style="color:var(--text3)">아직 기준일이 설정되지 않았습니다. 전체 이력으로 재고를 계산합니다.</span>';
+    return;
+  }
+  const before = logs.filter(l => (l.date || '') <= base).length;
+  const after  = logs.filter(l => (l.date || '') >  base).length;
+  el.innerHTML =
+    `<div style="background:rgba(46,164,79,.1);border:1px solid var(--accent);border-radius:6px;padding:8px 12px;line-height:1.7">
+       현재 기준일 <strong style="color:var(--accent)">${base}</strong><br>
+       <span style="font-size:11px;color:var(--text3)">
+         · 기준일 이전 이력 ${before.toLocaleString()}건 — 보존만 (재고 미반영)<br>
+         · 기준일 이후 이력 ${after.toLocaleString()}건 — 재고에 반영 중
+       </span>
+     </div>`;
+}
+
+function openStockSetup() {
+  const d = document.getElementById('stockSetDate');
+  if (d && !d.value) d.value = today();
+  // 현재 재고를 기본값으로 불러온다
+  stockSetupRows = inventory.map(r => ({
+    id: r.id, gas: r.gas, size: r.size, company: r.company,
+    full: r.full || 0, empty: r.empty || 0, isNew: false,
+  })).sort((a,b) => (a.company||'').localeCompare(b.company||'') || (a.gas||'').localeCompare(b.gas||''));
+  document.getElementById('stockSetupBox').style.display = 'block';
+  renderStockSetup();
+}
+
+function renderStockSetup() {
+  const box = document.getElementById('stockSetupRows');
+  if (!box || !stockSetupRows) return;
+  const q = (document.getElementById('stockSetFilter')?.value || '').trim().toLowerCase();
+  const hideZero = !!document.getElementById('stockSetHideZero')?.checked;
+
+  const view = stockSetupRows.filter((r, i) => {
+    r._i = i;
+    if (hideZero && !r.full && !r.empty && !r.isNew) return false;
+    if (!q) return true;
+    return `${r.gas} ${r.size} ${r.company}`.toLowerCase().includes(q);
+  });
+
+  box.innerHTML = `
+    <div style="font-size:11px;color:var(--text3);margin-bottom:6px">${view.length}개 품목 · 실사한 수량을 입력하세요</div>
+    <div class="tbl-wrap" style="max-height:420px"><table>
+      <thead><tr><th>가스</th><th>규격</th><th>업체</th><th class="num" style="width:90px">실병</th><th class="num" style="width:90px">공병</th><th style="width:40px"></th></tr></thead>
+      <tbody>${view.map(r => `<tr${r.isNew ? ' style="background:rgba(46,164,79,.07)"' : ''}>
+        <td style="font-size:11px">${r.isNew
+          ? `<input type="text" value="${r.gas}" placeholder="가스 품목" style="width:100%;font-size:11px" oninput="stockSetupRows[${r._i}].gas=this.value">`
+          : r.gas}</td>
+        <td style="font-family:var(--mono);font-size:11px">${r.isNew
+          ? `<input type="text" value="${r.size}" placeholder="47L" style="width:70px;font-size:11px" oninput="stockSetupRows[${r._i}].size=this.value">`
+          : r.size}</td>
+        <td style="font-size:11px">${r.isNew
+          ? `<input type="text" value="${r.company}" placeholder="업체" style="width:100%;font-size:11px" oninput="stockSetupRows[${r._i}].company=this.value">`
+          : r.company}</td>
+        <td class="num"><input type="number" value="${r.full}" style="width:80px;text-align:right;font-family:var(--mono)"
+              oninput="stockSetupRows[${r._i}].full=parseInt(this.value)||0"></td>
+        <td class="num"><input type="number" value="${r.empty}" style="width:80px;text-align:right;font-family:var(--mono)"
+              oninput="stockSetupRows[${r._i}].empty=parseInt(this.value)||0"></td>
+        <td>${r.isNew ? `<button class="btn btn-sm" style="padding:1px 6px;font-size:11px;background:transparent;border:1px solid var(--danger);color:var(--danger)" onclick="stockSetupRows.splice(${r._i},1);renderStockSetup()">×</button>` : ''}</td>
+      </tr>`).join('')}</tbody>
+    </table></div>`;
+}
+
+function addStockSetupRow() {
+  if (!stockSetupRows) return;
+  stockSetupRows.unshift({ id:null, gas:'', size:'47L', company:'', full:0, empty:0, isNew:true });
+  renderStockSetup();
+}
+
+function applyStockSetup() {
+  if (!stockSetupRows) return;
+  const date = document.getElementById('stockSetDate')?.value || today();
+
+  const bad = stockSetupRows.filter(r => r.isNew && (!r.gas.trim() || !r.size.trim() || !r.company.trim()));
+  if (bad.length) { alert('새로 추가한 품목의 가스·규격·업체를 모두 입력해주세요.'); return; }
+
+  // 변경되는 항목만 추린다
+  const changes = [];
+  stockSetupRows.forEach(r => {
+    const cur = r.id ? inventory.find(x => x.id === r.id) : null;
+    const oldFull = cur ? (cur.full || 0) : 0;
+    const oldEmpty = cur ? (cur.empty || 0) : 0;
+    if (oldFull !== r.full || oldEmpty !== r.empty || !cur) {
+      changes.push({ r, cur, oldFull, oldEmpty });
+    }
+  });
+
+  if (!changes.length) { alert('변경된 값이 없습니다.'); return; }
+
+  const totF = stockSetupRows.reduce((s,r) => s + r.full, 0);
+  const totE = stockSetupRows.reduce((s,r) => s + r.empty, 0);
+
+  if (!confirm(
+    `${date} 기준 재고로 확정합니다.\n\n` +
+    `  변경 품목 : ${changes.length}개\n` +
+    `  전체 실병 : ${totF.toLocaleString()}개\n` +
+    `  전체 공병 : ${totE.toLocaleString()}개\n\n` +
+    `✅ 생산·출고·충전 이력은 그대로 유지됩니다.\n` +
+    `⚠️ 재고 수량만 입력한 값으로 바뀝니다.\n\n` +
+    `백업은 받으셨나요? 계속하시겠습니까?`
+  )) return;
+
+  changes.forEach(({ r, cur }) => {
+    if (cur) {
+      cur.full = r.full;
+      cur.empty = r.empty;
+    } else {
+      inventory.push({ id: uid(), gas: r.gas.trim(), size: r.size.trim(), company: r.company.trim(),
+                       dinoCode:'', full: r.full, empty: r.empty, liter: null });
+    }
+  });
+
+  // 기준일 기록 — 이 날짜까지의 이력은 재고 계산에서 제외된다
+  setStockBaseDate(date);
+
+  save(STORE_KEY_INV, inventory);
+  document.getElementById('stockSetupBox').style.display = 'none';
+  renderStockBaseNow();
+  renderAll && renderAll();
+  alert(`✅ ${date} 기준 재고로 확정했습니다.\n\n` +
+        `변경 ${changes.length}개 품목\n실병 ${totF.toLocaleString()}개 · 공병 ${totE.toLocaleString()}개\n\n` +
+        `이력은 그대로 유지되었습니다.`);
+}
+
+// 재고 입력용 엑셀 양식
+async function downloadStockSetupTemplate() {
+  if (typeof JSZip === 'undefined') { alert('압축 라이브러리가 로드되지 않았습니다.'); return; }
+  const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const rows = [
+    ['[stock] 재고 기준일 셋팅 양식 — 이 줄은 지우지 마세요'],
+    ['현재 등록된 품목을 불러왔습니다. 실사한 수량으로 고쳐주세요. 새 품목은 아래에 추가하셔도 됩니다.'],
+    ['가스 품목', '규격', '업체', '실병', '공병'],
+    ...inventory.map(r => [r.gas, r.size, r.company, r.full || 0, r.empty || 0]),
+  ];
+  let xml = '';
+  rows.forEach((r, ri) => {
+    xml += `<row r="${ri+1}">` + r.map((v, ci) => {
+      const col = String.fromCharCode(65 + ci);
+      return (typeof v === 'number')
+        ? `<c r="${col}${ri+1}"><v>${v}</v></c>`
+        : `<c r="${col}${ri+1}" t="inlineStr"><is><t>${esc(v)}</t></is></c>`;
+    }).join('') + '</row>';
+  });
+  const sheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols><col min="1" max="5" width="20" customWidth="1"/></cols><sheetData>${xml}</sheetData></worksheet>`;
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`);
+  zip.file('_rels/.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`);
+  zip.file('xl/workbook.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="재고" sheetId="1" r:id="rId1"/></sheets></workbook>`);
+  zip.file('xl/_rels/workbook.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`);
+  zip.file('xl/worksheets/sheet1.xml', sheet);
+  const buf = await zip.generateAsync({ type:'arraybuffer', compression:'DEFLATE' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([buf], { type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
+  a.download = `재고셋팅_${today()}.xlsx`;
+  document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1200);
+}
+
+// ══════ 재고 ↔ 이력 대조 ══════
+// "출고했는데 재고가 안 줄어든다" 같은 상황의 원인을 찾기 위한 도구.
+// 이력(생산·출고·입고·조정)의 증감 합계와 현재 재고를 비교한다.
+function auditStockVsLogs() {
+  const el = document.getElementById('stockAuditResult');
+  if (el) el.innerHTML = '<span style="color:var(--text3)">⏳ 대조 중...</span>';
+
+  setTimeout(() => {
+    // 기준일이 설정돼 있으면 그 다음날부터의 이력만 재고에 반영된다
+    const inputFrom = document.getElementById('stockAuditFrom')?.value || '';
+    const base = getStockBaseDate();
+    const from = inputFrom || base;
+
+    // 이력 합계 (품목별)
+    const sum = {};
+    logs.filter(l => !from || (l.date || '') > from).forEach(l => {
+      const key = `${l.gas}|${l.size}|${l.company}`;
+      if (!sum[key]) sum[key] = { gas: l.gas, size: l.size, company: l.company, full: 0, empty: 0, cnt: 0 };
+      sum[key].full  += (l.dFull  || 0);
+      sum[key].empty += (l.dEmpty || 0);
+      sum[key].cnt++;
+    });
+
+    // 재고와 대조
+    const rows = [];
+    inventory.forEach(r => {
+      const key = `${r.gas}|${r.size}|${r.company}`;
+      const s = sum[key] || { full: 0, empty: 0, cnt: 0 };
+      const gapFull  = (r.full  || 0) - s.full;
+      const gapEmpty = (r.empty || 0) - s.empty;
+      if (gapFull !== 0 || gapEmpty !== 0 || (r.full || 0) !== 0) {
+        rows.push({ gas: r.gas, size: r.size, company: r.company,
+                    invFull: r.full || 0, logFull: s.full, gapFull,
+                    invEmpty: r.empty || 0, logEmpty: s.empty, gapEmpty, cnt: s.cnt });
+      }
+      delete sum[key];
+    });
+    // 이력은 있는데 재고 항목이 없는 경우
+    Object.values(sum).forEach(s => {
+      rows.push({ gas: s.gas, size: s.size, company: s.company,
+                  invFull: 0, logFull: s.full, gapFull: -s.full,
+                  invEmpty: 0, logEmpty: s.empty, gapEmpty: -s.empty, cnt: s.cnt, orphan: true });
+    });
+
+    rows.sort((a, b) => Math.abs(b.gapFull) - Math.abs(a.gapFull));
+    const bad = rows.filter(r => r.gapFull !== 0 || r.gapEmpty !== 0);
+
+    el.innerHTML = `
+      <div style="margin-bottom:8px;font-size:12px">
+        총 ${rows.length}개 품목 · <strong style="color:${bad.length ? 'var(--warn)' : 'var(--accent)'}">차이 있음 ${bad.length}개</strong>
+        ${from ? ` · 기준일 ${from} 이후 이력 기준` : ' · 전체 이력 기준'}
+      </div>
+      <div class="tbl-wrap" style="max-height:340px"><table>
+        <thead><tr>
+          <th>가스</th><th>규격</th><th>업체</th>
+          <th class="num">재고(실)</th><th class="num">이력합(실)</th><th class="num">차이</th>
+          <th class="num">재고(공)</th><th class="num">이력합(공)</th><th class="num">차이</th>
+          <th class="num">이력수</th>
+        </tr></thead>
+        <tbody>${rows.map(r => {
+          const c1 = r.gapFull  !== 0 ? 'var(--warn)' : 'var(--text3)';
+          const c2 = r.gapEmpty !== 0 ? 'var(--warn)' : 'var(--text3)';
+          return `<tr${r.orphan ? ' style="background:rgba(248,81,73,.06)"' : ''}>
+            <td style="font-size:11px">${r.gas}${r.orphan ? ' <span style="font-size:9px;color:var(--danger)">재고항목 없음</span>' : ''}</td>
+            <td style="font-family:var(--mono);font-size:11px">${r.size}</td>
+            <td style="font-size:11px">${r.company}</td>
+            <td class="num" style="font-family:var(--mono)">${r.invFull}</td>
+            <td class="num" style="font-family:var(--mono);color:var(--text3)">${r.logFull}</td>
+            <td class="num" style="font-family:var(--mono);color:${c1};font-weight:700">${r.gapFull > 0 ? '+' : ''}${r.gapFull}</td>
+            <td class="num" style="font-family:var(--mono)">${r.invEmpty}</td>
+            <td class="num" style="font-family:var(--mono);color:var(--text3)">${r.logEmpty}</td>
+            <td class="num" style="font-family:var(--mono);color:${c2};font-weight:700">${r.gapEmpty > 0 ? '+' : ''}${r.gapEmpty}</td>
+            <td class="num" style="font-family:var(--mono);color:var(--text3)">${r.cnt}</td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table></div>
+      <div style="font-size:11px;color:var(--text3);margin-top:8px;line-height:1.6">
+        <strong>차이</strong> = 재고 − 이력합계.
+        <span style="color:var(--warn)">0이 아니면</span> 이력 없이 재고가 바뀐 것입니다.<br>
+        기준일을 <strong>운영 시작일</strong>로 두면, 그날 이후 이력만으로 재고가 맞는지 확인할 수 있습니다.
+      </div>`;
+  }, 30);
+}
+
 // ══════ 농도 없는 혼합가스 품명 찾기 · 일괄 변경 ══════
 function scanMixNoPct() {
   const el = document.getElementById('mixNoPctResult');
@@ -3606,15 +4585,21 @@ function scanMixNoPct() {
           <td class="num" style="font-family:var(--mono);color:var(--text3)">${stat[g].prod}</td>
           <td class="num" style="font-family:var(--mono);color:var(--text3)">${stat[g].ship}</td>
           <td class="num" style="font-family:var(--mono);color:var(--text3)">${stat[g].an}</td>
-          <td><input type="text" id="mixRename${i}" placeholder="예: 5%${g}" value=""
-                style="width:100%;font-family:var(--mono);font-size:12px"></td>
+          <td>
+            <input type="text" id="mixRename${i}" placeholder="예: 5%${g}" value=""
+                   style="width:100%;font-family:var(--mono);font-size:12px">
+            <div style="font-size:10px;color:var(--text3);margin-top:2px">성분: ${stampCompsOf(g).join(' + ') || '—'}</div>
+          </td>
           <td><button class="btn btn-sm btn-success" style="padding:2px 8px;font-size:11px"
                 onclick="applyGasRename('${g.replace(/'/g,"\\'")}', document.getElementById('mixRename${i}').value)">변경</button></td>
         </tr>`).join('')}</tbody>
       </table></div>
-      <div style="font-size:11px;color:var(--text3);margin-top:6px">
+      <div style="font-size:11px;color:var(--text3);margin-top:6px;line-height:1.7">
         💡 바꿀 품명을 입력하고 <strong>변경</strong>을 누르면 재고·이력·분석 전체에서 해당 품명이 교체됩니다.
-        같은 품명이 이미 있으면 재고를 합칩니다.
+        같은 품명이 이미 있으면 재고를 합칩니다.<br>
+        <strong style="color:var(--warn)">생산·분석 건수가 0이 아닌 항목은 성적서에 농도가 빠진 채 나갔을 수 있습니다.</strong>
+        해당 LOT의 실제 농도를 확인해 입력해주세요.<br>
+        <span style="color:var(--text3)">※ 재고(공병) 항목은 각인만 등록된 것이므로 그대로 두셔도 됩니다.</span>
       </div>`;
   }, 30);
 }
@@ -3667,6 +4652,318 @@ function applyGasRename(oldGas, newGasRaw) {
   renderAll && renderAll();
   alert(`✅ ${total}건 변경 완료\n\n  "${oldGas}" → "${newGas}"` +
         `${merged.length ? `\n(재고 ${merged.length}건은 기존 품목과 합쳤습니다)` : ''}`);
+}
+
+// ══════════════════════════════════════════════════════════════
+//  용기번호 유실 진단
+//  Firebase 서버의 원본을 그대로 읽어, 압축 해제 전/후를 모두 확인한다.
+//  화면 데이터가 아니라 서버에 실제로 무엇이 저장돼 있는지 본다.
+// ══════════════════════════════════════════════════════════════
+async function diagnoseCylLoss() {
+  const el = document.getElementById('cylLossResult');
+  el.innerHTML = '<span style="color:var(--text3)">⏳ 서버에서 원본을 가져오는 중...</span>';
+
+  let raw = null, err = null;
+  try {
+    const res = await fetch(`${FS_REST_BASE}/${STORE_KEY_LOG}?key=${FS_API_KEY}`);
+    if (!res.ok) throw new Error('서버 응답 ' + res.status);
+    const j = await res.json();
+    raw = _fromRestValue(j.fields.data);          // 압축 해제 전 원본
+  } catch (e) { err = e.message || String(e); }
+
+  // 월별 집계 함수
+  const summarize = (arr, label) => {
+    const byMonth = {};
+    (arr || []).filter(l => l.type === 'produce').forEach(l => {
+      const m = (l.date || '').slice(0, 7) || '(날짜없음)';
+      if (!byMonth[m]) byMonth[m] = { total: 0, withCyl: 0, cylCount: 0 };
+      byMonth[m].total++;
+      const cyls = Array.isArray(l.containers)
+        ? l.containers.map(cylNoOf).filter(v => v && !_isBadCylValue(v)) : [];
+      if (cyls.length) { byMonth[m].withCyl++; byMonth[m].cylCount += cyls.length; }
+    });
+    const months = Object.keys(byMonth).sort();
+    if (!months.length) return `<div style="color:var(--danger)">${label}: 생산 이력 없음</div>`;
+    return `
+      <div style="font-weight:700;color:var(--text2);margin:10px 0 6px">${label}</div>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>월</th><th class="num">생산건수</th><th class="num">용기번호 있음</th><th class="num">용기 총개수</th><th>상태</th></tr></thead>
+        <tbody>${months.map(m => {
+          const b = byMonth[m];
+          const lost = b.total - b.withCyl;
+          return `<tr${lost ? ' style="background:rgba(248,81,73,.08)"' : ''}>
+            <td style="font-family:var(--mono)">${m}</td>
+            <td class="num" style="font-family:var(--mono)">${b.total}</td>
+            <td class="num" style="font-family:var(--mono);color:${b.withCyl ? 'var(--accent)' : 'var(--danger)'}">${b.withCyl}</td>
+            <td class="num" style="font-family:var(--mono);color:var(--text3)">${b.cylCount}</td>
+            <td style="font-size:11px;color:${lost ? 'var(--danger)' : 'var(--accent)'}">${lost ? `⚠️ ${lost}건 유실` : '✅ 정상'}</td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table></div>`;
+  };
+
+  // 서버 원본 샘플 (7월 생산건 3개)
+  let sample = '';
+  if (raw) {
+    const julRaw = raw.filter(l => l.type === 'produce' && (l.date || '').startsWith('2026-07')).slice(0, 3);
+    if (julRaw.length) {
+      sample = `
+        <div style="font-weight:700;color:var(--text2);margin:12px 0 6px">📄 서버 원본 (7월 생산 3건, 압축 해제 전)</div>
+        <pre style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:10px;font-size:10px;
+                    font-family:var(--mono);color:var(--text2);white-space:pre-wrap;max-height:260px;overflow:auto">${
+          _esc(JSON.stringify(julRaw.map(l => ({
+            lotNo: l.lotNo, date: l.date, gas: l.gas,
+            containers: l.containers,
+            dFull: l.dFull
+          })), null, 2))
+        }</pre>`;
+    } else {
+      sample = '<div style="color:var(--warn);margin-top:10px">서버에 2026-07 생산 이력이 없습니다.</div>';
+    }
+  }
+
+  const expanded = raw ? _expandLogsAfterLoad(JSON.parse(JSON.stringify(raw))) : null;
+
+  el.innerHTML =
+    (err ? `<div style="color:var(--danger);margin-bottom:10px">☁️ 서버 조회 실패: ${_esc(err)}</div>` : '') +
+    (raw      ? summarize(raw,      '☁️ Firebase 서버 원본 (압축 해제 전)') : '') +
+    (expanded ? summarize(expanded, '☁️ 압축 해제 후 (앱이 실제로 쓰는 값)') : '') +
+    summarize(logs, '💻 이 PC 화면 데이터') +
+    sample +
+    `<div style="margin-top:12px;padding:10px 14px;background:var(--bg3);border-radius:6px;font-size:11px;color:var(--text3);line-height:1.8">
+       <strong>보는 법</strong><br>
+       · 서버 원본에 용기번호가 <strong>있으면</strong> → 화면 표시 문제. 복구 가능합니다.<br>
+       · 서버 원본에도 <strong>없으면</strong> → 서버 데이터가 덮어써진 것. 다른 PC 확인이 필요합니다.<br>
+       · 압축 해제 전후가 <strong>다르면</strong> → 압축/복원 과정의 문제입니다.
+     </div>`;
+}
+
+function _esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ══════════════════════════════════════════════════════════════
+//  출고 용기번호 복구
+//  출고 이력의 cylinders 가 비어 있어도, 생산 이력의 containers 에
+//  용기번호가 남아 있다. 아직 다른 출고에 쓰이지 않은 번호를 찾아 채운다.
+// ══════════════════════════════════════════════════════════════
+let _recoverPlan = null;
+
+function scanMissingShipCyls() {
+  const el = document.getElementById('recoverCylResult');
+  el.innerHTML = '<span style="color:var(--text3)">⏳ 확인 중...</span>';
+
+  setTimeout(() => {
+    // LOT별 생산 용기번호
+    const prodByLot = {};
+    logs.filter(l => l.type === 'produce' && l.lotNo).forEach(l => {
+      const key = l.lotNo;
+      if (!prodByLot[key]) prodByLot[key] = [];
+      (l.containers || []).forEach(c => {
+        const no = cylNoOf(c);
+        if (no && !_isBadCylValue(no) && !prodByLot[key].includes(no)) prodByLot[key].push(no);
+      });
+    });
+
+    // LOT별로 이미 출고에 쓰인 용기번호
+    const usedByLot = {};
+    logs.filter(l => l.type === 'ship' && l.lotNo).forEach(l => {
+      const key = l.lotNo;
+      if (!usedByLot[key]) usedByLot[key] = new Set();
+      (l.cylinders || []).forEach(c => {
+        const no = cylNoOf(c);
+        if (no && !_isBadCylValue(no)) usedByLot[key].add(no);
+      });
+    });
+
+    // 비어 있거나 모자란 출고 찾기 (오래된 것부터 채워야 순서가 맞다)
+    const targets = logs
+      .filter(l => l.type === 'ship' && l.lotNo)
+      .filter(l => {
+        const good = (l.cylinders || []).map(cylNoOf).filter(v => v && !_isBadCylValue(v));
+        const qty = Math.abs(l.dFull || 0);
+        return qty > 0 && good.length < qty;
+      })
+      .sort((a,b) => `${a.date}${a.time||''}`.localeCompare(`${b.date}${b.time||''}`));
+
+    if (!targets.length) {
+      el.innerHTML = '<span style="color:var(--accent)">✅ 용기번호가 비어 있는 출고가 없습니다.</span>';
+      _recoverPlan = null;
+      return;
+    }
+
+    // 채울 번호 계산 (앞 건이 쓴 번호는 뒤 건에서 제외)
+    const plan = [];
+    const taken = {};
+    Object.keys(usedByLot).forEach(k => { taken[k] = new Set(usedByLot[k]); });
+
+    targets.forEach(l => {
+      const key = l.lotNo;
+      const have = (l.cylinders || []).map(cylNoOf).filter(v => v && !_isBadCylValue(v));
+      const qty  = Math.abs(l.dFull || 0);
+      const need = qty - have.length;
+      const pool = (prodByLot[key] || []).filter(no => !(taken[key] || new Set()).has(no));
+      const pick = pool.slice(0, need);
+      pick.forEach(no => { if (!taken[key]) taken[key] = new Set(); taken[key].add(no); });
+      plan.push({ id: l.id, lotNo: key, date: l.date, company: l.company, gas: l.gas,
+                  qty, have, pick, short: need - pick.length,
+                  prodTotal: (prodByLot[key] || []).length });
+    });
+
+    _recoverPlan = plan;
+    const fillable = plan.filter(p => p.pick.length);
+    const shortCnt = plan.filter(p => p.short > 0).length;
+
+    el.innerHTML = `
+      <div style="margin-bottom:8px">
+        비어 있는 출고 <strong>${plan.length}건</strong> ·
+        <strong style="color:var(--accent)">채울 수 있음 ${fillable.length}건</strong>
+        ${shortCnt ? ` · <span style="color:var(--warn)">부족 ${shortCnt}건</span>` : ''}
+      </div>
+      <div class="tbl-wrap" style="max-height:340px"><table>
+        <thead><tr><th>출고일</th><th>LOT</th><th>업체</th><th class="num">출고</th><th class="num">보유</th><th>채울 용기번호</th></tr></thead>
+        <tbody>${plan.map(p => `<tr${p.pick.length ? '' : ' style="opacity:.5"'}>
+          <td style="font-family:var(--mono);font-size:11px">${p.date}</td>
+          <td style="font-family:var(--mono);font-size:11px;color:var(--accent2)">${p.lotNo}</td>
+          <td style="font-size:11px">${p.company || ''}</td>
+          <td class="num" style="font-family:var(--mono)">${p.qty}</td>
+          <td class="num" style="font-family:var(--mono);color:var(--text3)">${p.have.length}</td>
+          <td style="font-family:var(--mono);font-size:11px;color:${p.pick.length ? 'var(--accent)' : 'var(--warn)'}">
+            ${p.pick.join(', ') || '생산 이력에 남은 용기번호 없음'}
+            ${p.short > 0 ? `<span style="color:var(--warn)"> (${p.short}개 부족)</span>` : ''}
+          </td>
+        </tr>`).join('')}</tbody>
+      </table></div>
+      ${fillable.length ? `
+      <div class="flex-gap" style="gap:8px;margin-top:12px">
+        <button class="btn btn-success" onclick="applyRecoverCyls()">✅ 위 내용으로 채우기 (${fillable.length}건)</button>
+      </div>
+      <div style="font-size:11px;color:var(--text3);margin-top:6px;line-height:1.7">
+        ※ 생산 이력의 용기번호 중 아직 출고되지 않은 것을 <strong>출고일 순서대로</strong> 배정합니다.<br>
+        ※ 실제와 다르면 <strong>🔎 LOT 저장 내용 확인</strong> 에서 건별로 직접 고칠 수 있습니다.
+      </div>` : ''}`;
+  }, 30);
+}
+
+function applyRecoverCyls() {
+  if (!_recoverPlan) return;
+  const list = _recoverPlan.filter(p => p.pick.length);
+  if (!list.length) { alert('채울 수 있는 건이 없습니다.'); return; }
+
+  if (!confirm(
+    `출고 ${list.length}건의 용기번호를 채웁니다.\n\n` +
+    list.slice(0, 6).map(p => `  ${p.lotNo} (${p.date}) : ${p.pick.length}개`).join('\n') +
+    (list.length > 6 ? `\n  ... 외 ${list.length - 6}건` : '') +
+    `\n\n생산 이력에 남아 있는 용기번호를 배정합니다.\n` +
+    `백업은 받으셨나요? 계속하시겠습니까?`
+  )) return;
+
+  let done = 0;
+  list.forEach(p => {
+    const l = logs.find(x => x.id === p.id);
+    if (!l) return;
+    const have = (l.cylinders || []).map(cylNoOf).filter(v => v && !_isBadCylValue(v));
+    l.cylinders = have.concat(p.pick);
+    done++;
+  });
+
+  if (window._invalidateCylCache) window._invalidateCylCache();
+  save(STORE_KEY_LOG, logs);
+  scanMissingShipCyls();
+  alert(`✅ ${done}건의 용기번호를 채웠습니다.\n\n성적서를 다시 발행해 확인해주세요.`);
+}
+
+// ══════════════════════════════════════════════════════════════
+//  LOT 저장 내용 그대로 보기
+//  화면에 가공된 값이 아니라, 실제 저장된 원본을 보여준다.
+//  Firebase 에 무엇이 올라가 있는지 확인하는 용도.
+// ══════════════════════════════════════════════════════════════
+async function inspectLot() {
+  const q = (document.getElementById('lotInspectNo')?.value || '').trim();
+  const el = document.getElementById('lotInspectResult');
+  if (!q) { alert('LOT 번호를 입력해주세요.'); return; }
+  el.innerHTML = '<span style="color:var(--text3)">⏳ 확인 중...</span>';
+
+  const up = q.toUpperCase();
+  const hit = l => String(l.lotNo || '').toUpperCase().includes(up);
+
+  const prods = logs.filter(l => l.type === 'produce' && hit(l));
+  const ships = logs.filter(l => l.type === 'ship'    && hit(l));
+  const ans   = analysisData.filter(a => String(a.lotNo || '').toUpperCase().includes(up));
+
+  if (!prods.length && !ships.length && !ans.length) {
+    el.innerHTML = `<span style="color:var(--danger)">❌ "${q}" 로 시작하는 LOT 을 찾을 수 없습니다.</span>`;
+    return;
+  }
+
+  const cylList = arr => {
+    if (!Array.isArray(arr)) return `<span style="color:var(--danger)">없음 (${typeof arr})</span>`;
+    if (!arr.length)        return `<span style="color:var(--danger)">빈 배열 []</span>`;
+    const good = arr.map(cylNoOf).filter(v => v && !_isBadCylValue(v));
+    return `<span style="font-family:var(--mono)">${good.join(', ') || '<span style="color:var(--danger)">읽을 수 있는 번호 없음</span>'}</span>
+            <span style="color:var(--text3)"> (${good.length}개)</span>`;
+  };
+
+  // 서버에 저장된 내용도 직접 가져와 비교
+  let serverInfo = '';
+  try {
+    const res = await fetch(`${FS_REST_BASE}/${STORE_KEY_LOG}?key=${FS_API_KEY}`);
+    if (res.ok) {
+      const j = await res.json();
+      const val = _fromRestValue(j.fields.data);
+      const arr = Array.isArray(val) ? _expandLogsAfterLoad(val) : [];
+      const sp = arr.filter(l => l.type === 'produce' && hit(l));
+      const ss = arr.filter(l => l.type === 'ship'    && hit(l));
+      serverInfo = `
+        <div style="margin-top:12px;padding:10px 14px;background:rgba(46,164,79,.08);border:1px solid var(--accent);border-radius:6px">
+          <div style="font-weight:700;color:var(--accent);margin-bottom:6px">☁️ Firebase 서버에 저장된 내용</div>
+          ${sp.map(l => `<div style="margin-bottom:4px">생산 <strong>${l.lotNo}</strong> · 용기 ${cylList(l.containers)}</div>`).join('')}
+          ${ss.map(l => `<div style="margin-bottom:4px">출고 <strong>${l.lotNo}</strong> · ${l.date} · 용기 ${cylList(l.cylinders)}</div>`).join('')}
+          ${(!sp.length && !ss.length) ? '<span style="color:var(--danger)">서버에 해당 LOT 이 없습니다.</span>' : ''}
+        </div>`;
+    } else {
+      serverInfo = `<div style="margin-top:10px;color:var(--warn);font-size:11px">☁️ 서버 조회 실패 (${res.status}) — 아래는 이 PC에 저장된 내용입니다.</div>`;
+    }
+  } catch (e) {
+    serverInfo = `<div style="margin-top:10px;color:var(--warn);font-size:11px">☁️ 서버 조회 불가 — 아래는 이 PC에 저장된 내용입니다.</div>`;
+  }
+
+  const box = (title, items, render) => !items.length ? '' : `
+    <div style="margin-bottom:12px">
+      <div style="font-weight:700;color:var(--text2);margin-bottom:6px">${title} (${items.length}건)</div>
+      ${items.map(render).join('')}
+    </div>`;
+
+  el.innerHTML =
+    box('🏭 생산 이력', prods, l => `
+      <div style="background:var(--bg3);border-radius:6px;padding:10px 12px;margin-bottom:6px;line-height:1.8">
+        <strong style="font-family:var(--mono);color:var(--accent)">${l.lotNo}</strong>
+        · ${l.date} · ${l.gas} · ${l.size} · ${l.company}<br>
+        실병 ${l.dFull ?? '—'} / 공병 ${l.dEmpty ?? '—'}<br>
+        용기번호: ${cylList(l.containers)}
+      </div>`) +
+    box('📦 출고 이력', ships, l => `
+      <div style="background:var(--bg3);border-radius:6px;padding:10px 12px;margin-bottom:6px;line-height:1.8">
+        <strong style="font-family:var(--mono);color:var(--accent2)">${l.lotNo}</strong>
+        · ${l.date} · ${l.gas} · ${l.size} · ${l.company}<br>
+        출고 수량: ${Math.abs(l.dFull || 0)}병<br>
+        용기번호: ${cylList(l.cylinders)}
+        ${(() => {
+          const g = (l.cylinders || []).map(cylNoOf).filter(v => v && !_isBadCylValue(v));
+          const q2 = Math.abs(l.dFull || 0);
+          return (q2 && g.length !== q2)
+            ? `<br><span style="color:var(--warn)">⚠️ 출고 ${q2}병인데 용기번호는 ${g.length}개입니다</span>
+               <button class="btn btn-sm" style="margin-left:6px;padding:1px 8px;font-size:11px;background:rgba(210,153,34,.2);border:1px solid var(--warn);color:var(--warn)" onclick="fixShipCyls('${l.id}')">✏️ 수정</button>`
+            : '';
+        })()}
+      </div>`) +
+    box('🧪 분석 데이터', ans, a => `
+      <div style="background:var(--bg3);border-radius:6px;padding:10px 12px;margin-bottom:6px;line-height:1.8">
+        <strong style="font-family:var(--mono)">${a.lotNo}</strong> · ${a.gas} · ${a.size || '—'}<br>
+        분석일 ${a.analysisDate || '—'} · 분석자 ${a.analyst || '—'}<br>
+        용기번호: ${cylList(a.containers)}
+      </div>`) +
+    serverInfo;
 }
 
 // ══════ 용기번호 점검 · 복구 ══════
@@ -4598,6 +5895,17 @@ function nav(id) {
     }
     renderSigList();
     refreshArchiveRestoreBox();   // 따로 보관된 이력이 있으면 알림
+    // 재고 기준일을 셋팅한 적이 있으면 대조 기준일로 채워둔다
+    try {
+      const bd = localStorage.getItem('gasims_stock_base_date');
+      const el = document.getElementById('stockAuditFrom');
+      if (bd && el && !el.value) el.value = bd;
+      const sd = document.getElementById('stockSetDate');
+      if (bd && sd && !sd.value) sd.value = bd;
+    } catch(e) {}
+    renderStockBaseNow();         // 현재 재고 기준일
+    renderBomKg();                // 1병당 소모 kg 설정
+    calcTankLv();                 // 레벨 환산 안내
     // 캔버스 초기화 (관리자 탭 진입 시)
     setTimeout(() => initSigCanvas(), 100);
   }
@@ -5054,11 +6362,14 @@ function updateProdMixWarn() {
   }
   if (isMixWithoutPct(gas)) {
     box.style.display = 'block';
-    box.innerHTML = `⚠️ <strong>농도가 지정되지 않은 혼합가스입니다.</strong><br>
+    box.innerHTML = `🚫 <strong>농도를 기입하시오 — 이대로는 생산할 수 없습니다.</strong><br>
       "${gas}"는 공병 각인 성분만 등록된 품목이라 농도 정보가 없습니다.
-      이대로 생산하면 성적서에도 농도 없이 표기됩니다.<br>
+      아래 버튼으로 각 성분의 농도(%)를 지정해주세요.<br>
       <button class="btn btn-sm" style="margin-top:5px;background:var(--warn);color:#161b22;border:none;font-size:11px;padding:3px 10px"
         onclick="openPmixModal('prodGas')">🧪 농도 지정하기</button>`;
+    box.style.background = 'rgba(248,81,73,.12)';
+    box.style.borderColor = 'var(--danger)';
+    box.style.color = 'var(--danger)';
   } else {
     box.style.display = 'none';
   }
@@ -5107,6 +6418,8 @@ function onProdGasChange() {
   const isArGas = gas.startsWith('Ar');
 
   if (heSrcField) heSrcField.style.display = isHeGas ? 'block' : 'none';
+  renderProdCylSrc(gas);   // 실린더 원재료(H₂·O₂·CO₂·CH₄) 등급 선택 갱신
+  renderProdEmptySrc();    // 사용할 공병 목록 갱신
   if (heTankField) {
     if (isHeGas) {
       onProdHeSrcChange();
@@ -5126,6 +6439,117 @@ function onProdGasChange() {
     document.getElementById('cooldownCard').style.display = 'block';
     initCooldownTable();
   }
+}
+
+// ══════════════════════════════════════════════════════════════
+//  사용할 공병 선택
+//  제품(농도 포함)과 공병(각인)은 이름이 다르다.
+//  각인이 제품 성분을 전부 포함하면 그 공병을 쓸 수 있다.
+//    예) 35%H₂+Ar 생산  ←  각인 [Ar/CO₂/H₂/N₂] 공병 사용 가능
+//  우선순위는 두지 않고 현장에서 직접 고르게 한다.
+// ══════════════════════════════════════════════════════════════
+function findUsableEmpties(gas, size, company) {
+  if (!gas) return [];
+  return inventory
+    .filter(r => (!size || r.size === size) && (r.empty || 0) > 0 && canFillInto(r.gas, gas))
+    .map(r => ({
+      ...r,
+      own: !company || r.company === company,   // 해당 업체 병인지
+      exact: r.gas === gas,                     // 제품명과 동일한 재고인지
+    }))
+    .sort((a, b) => (b.own - a.own) || (b.exact - a.exact) || (b.empty - a.empty));
+}
+
+function renderProdEmptySrc() {
+  const box  = document.getElementById('prodEmptySrcField');
+  const sel  = document.getElementById('prodEmptySrc');
+  const info = document.getElementById('prodEmptySrcInfo');
+  if (!box || !sel) return;
+
+  const gas  = document.getElementById('prodGas')?.value || '';
+  const size = document.getElementById('prodSize')?.value || '';
+  const comp = document.getElementById('prodComp')?.value || '';
+  if (!gas || gas === '__NEW_MIX__') { box.style.display = 'none'; return; }
+
+  const list = findUsableEmpties(gas, size, comp);
+  box.style.display = 'block';
+  const prev = sel.value;
+
+  if (!list.length) {
+    sel.innerHTML = '<option value="">사용 가능한 공병 없음 — 재고 없이 생산</option>';
+    info.innerHTML = `<span style="color:var(--warn)">⚠️ "${gas}" 를 채울 수 있는 공병이 없습니다. ` +
+                     `그대로 저장하면 공병 재고가 음수가 됩니다.</span>`;
+    return;
+  }
+
+  sel.innerHTML = list.map(r =>
+    `<option value="${r.id}"${r.id === prev ? ' selected' : ''}>` +
+    `${r.gas} · ${r.size} · ${r.company} — 공병 ${r.empty}개${r.own ? '' : '  (타 업체/자가병)'}` +
+    `</option>`).join('');
+
+  const cur = list.find(r => r.id === sel.value) || list[0];
+  info.innerHTML = cur
+    ? `각인 성분: <strong>${stampCompsOf(cur.gas).join(' + ') || '—'}</strong> · ` +
+      `제품 성분: <strong>${stampCompsOf(gas).join(' + ') || '—'}</strong>` +
+      (cur.own ? '' : ' <span style="color:var(--warn)">· 해당 업체 병이 아닙니다</span>')
+    : '';
+}
+
+// ══════ 실린더 원재료(H₂·O₂·CO₂·CH₄) 등급 선택 ══════
+// 재고는 공업용/고순도로 나뉘어 있으므로, 생산 시 어느 재고에서 뺄지 고르게 한다.
+// (예전에는 존재하지 않는 'H2'/'O2'/'CO2' 키로 차감해 재고가 줄지 않았음)
+const CYL_RAW_GRADES = {
+  H2:  [['H2_pure','H₂ 고순도'], ['H2_industrial','H₂ 공업용']],
+  O2:  [['O2_pure','O₂ 고순도'], ['O2_industrial','O₂ 공업용']],
+  CO2: [['CO2_pure','CO₂ 고순도'], ['CO2_industrial','CO₂ 공업용']],
+  CH4: [['CH4','CH₄ (메탄)']],
+};
+
+// 해당 가스가 쓰는 실린더 원재료 종류 목록
+function cylRawKeysOf(gas) {
+  if (!gas) return [];
+  const keys = [];
+  if (isMixGas(gas)) {
+    parseMixComponents(gas).forEach(c => {
+      const k = symToRawKey(c.sym);
+      if (k && CYL_RAW_GRADES[k] && !keys.includes(k)) keys.push(k);
+    });
+  } else {
+    const k = getRawKey(gas);
+    if (k && CYL_RAW_GRADES[k]) keys.push(k);
+  }
+  return keys;
+}
+
+function renderProdCylSrc(gas) {
+  const box  = document.getElementById('prodCylSrcField');
+  const rows = document.getElementById('prodCylSrcRows');
+  if (!box || !rows) return;
+  const keys = cylRawKeysOf(gas);
+  if (!keys.length) { box.style.display = 'none'; rows.innerHTML = ''; return; }
+
+  box.style.display = 'block';
+  rows.innerHTML = keys.map(k => {
+    const opts = CYL_RAW_GRADES[k].map(([sk, label]) => {
+      const cur = rawMaterials[sk] || {};
+      const btl = cur.btl != null ? cur.btl : 0;
+      const kg  = cur.kg  != null ? Number(cur.kg).toFixed(1) : '0.0';
+      return `<option value="${sk}">${label} (${btl}병 / 잔량 ${kg}kg)</option>`;
+    }).join('');
+    return `<div style="min-width:210px">
+      <div style="font-size:11px;color:var(--text3);margin-bottom:3px">${CYL_RAW_GRADES[k][0][1].split(' ')[0]} 원료</div>
+      <select class="prod-cyl-src" data-raw="${k}" style="width:100%;font-size:12px">${opts}</select>
+    </div>`;
+  }).join('');
+}
+
+// 화면에서 고른 등급을 { H2:'H2_pure', ... } 형태로
+function getProdCylSrcMap() {
+  const map = {};
+  document.querySelectorAll('.prod-cyl-src').forEach(sel => {
+    map[sel.dataset.raw] = sel.value;
+  });
+  return map;
 }
 
 function onProdHeSrcChange() {
@@ -5150,6 +6574,7 @@ function loadProdRows() {
     '<option value="">업체선택</option>' + allCompanies.map(c=>`<option>${c}</option>`).join('');
 
   document.getElementById('prodRowsCard').style.display = 'block';
+  renderProdEmptySrc();
   renderLotTable();
   updateLotNo();
 }
@@ -5464,6 +6889,7 @@ function saveProd() {
   const lotNo  = document.getElementById('prodLotNo').value;
   const memo   = document.getElementById('prodMemo').value;
   if (!gas || !size) { alert('가스 품목과 규격을 선택해주세요.'); return; }
+  if (!checkStockBaseDate(date, '생산')) return;
 
   // 용기번호 + 압력 수집
   const containerRows = [...document.querySelectorAll('#lotBody tr')];
@@ -5491,15 +6917,18 @@ function saveProd() {
 
   if (!containers.length) { alert('용기번호를 1개 이상 입력해주세요.'); return; }
 
-  // 농도 없는 혼합가스로 저장하려는 경우 한 번 더 확인
+  // 농도 없는 혼합가스는 생산할 수 없다 (성적서에 농도가 빠지므로)
   if (isMixWithoutPct(gas)) {
-    if (!confirm(
-      `⚠️ "${gas}" 는 농도가 지정되지 않은 혼합가스입니다.\n\n` +
-      `공병 각인 성분만 등록된 품목이라 농도 정보가 없습니다.\n` +
-      `이대로 저장하면 성적서에도 농도 없이 "${gas}" 로 표기됩니다.\n\n` +
-      `그래도 이 품명으로 생산하시겠습니까?\n` +
-      `(취소 후 "🧪 농도 지정하기" 버튼으로 농도를 넣을 수 있습니다)`
-    )) return;
+    alert(
+      `⚠️ 농도를 기입하시오\n\n` +
+      `"${gas}" 는 공병 각인 성분만 등록된 품목이라 농도가 없습니다.\n` +
+      `이대로 생산하면 성적서에도 농도 없이 표기됩니다.\n\n` +
+      `가스 품목 아래 "🧪 농도 지정하기" 버튼을 눌러\n` +
+      `각 성분의 농도(%)를 입력한 뒤 다시 저장해주세요.`
+    );
+    const btn = document.querySelector('#prodMixWarn button');
+    if (btn) btn.scrollIntoView({ behavior:'smooth', block:'center' });
+    return;
   }
 
   const count = containers.length;
@@ -5529,23 +6958,32 @@ function saveProd() {
     const rowSize = group.size  || size;
     const add = group.items.length;
 
-    // 기초재고 검색 — 없으면 자동 생성
+    // 제품 재고 (실병이 쌓이는 곳) — 없으면 자동 생성
     let inv = inventory.find(r => r.gas===gas && r.size===rowSize && r.company===rowComp);
     if (!inv) {
       inv = { id: uid(), gas, size: rowSize, company: rowComp, dinoCode: '', full: 0, empty: 0, liter: null };
       inventory.push(inv);
     }
-
-    // 공병 부족 시 음수 허용 (공병 없이 생산한 경우 마이너스로 표시)
-    inv.empty = inv.empty - add;
     inv.full = inv.full + add;
+
+    // 공병은 "선택한 공병 재고"에서 뺀다.
+    // 제품명과 공병 각인은 이름이 다르므로, 제품 재고에서 빼면 각인 공병이 줄지 않는다.
+    let emptyInv = emptySrcId ? inventory.find(r => r.id === emptySrcId) : null;
+    if (!emptyInv || emptyInv.size !== rowSize) {
+      // 선택이 없거나 규격이 다르면 각인이 맞는 공병 중에서 찾는다
+      const cand = findUsableEmpties(gas, rowSize, rowComp);
+      emptyInv = cand[0] || inv;
+    }
+    emptyInv.empty = (emptyInv.empty || 0) - add;   // 공병 없으면 음수로 표시
 
     logs.push({
       id: uid(), date, time: now(),
       type: 'produce', typeLabel: '생산',
       gas, size: rowSize, company: rowComp,
       lotNo, containers: group.items,
-      dFull: add, dEmpty: -add,
+      dFull: add, dEmpty: emptyInv === inv ? -add : 0,
+      emptyFrom: emptyInv === inv ? null
+        : { id: emptyInv.id, gas: emptyInv.gas, size: emptyInv.size, company: emptyInv.company, qty: add },
       cooldown: cooldownData,
       memo: memo || ''
     });
@@ -5565,6 +7003,8 @@ function saveProd() {
 
   // He 원재료 출처 (ISO Tank / 카트리지) + N2/Ar 탱크 ID
   const heSrc = document.getElementById('prodHeSrc')?.value || 'tank';
+  const cylSrcMap = getProdCylSrcMap();
+  const emptySrcId = document.getElementById('prodEmptySrc')?.value || '';
   const selectedTankId = document.getElementById('prodHeTank')?.value || '';
 
   const consumption = calcProductionConsumption(gas, sizeL, fillBar, count);
@@ -5572,6 +7012,7 @@ function saveProd() {
   consumption.forEach(c => {
     if (c.key === 'He') { c.heSrc = heSrc; c.heTankId = selectedTankId; }
     else if (c.key === 'N2' || c.key === 'Ar') { c.tankId = selectedTankId; }
+    else if (cylSrcMap[c.key]) { c.stockKey = cylSrcMap[c.key]; }   // 실린더 원재료 등급
   });
   let deductResult = [];
   if (consumption.length > 0) {
@@ -5763,6 +7204,11 @@ function saveProdEdit() {
 
   if (!newDate) { alert('날짜를 입력해주세요.'); return; }
   if (!newLot)  { alert('LOT 번호를 입력해주세요.'); return; }
+  if (isMixWithoutPct(newGas)) {
+    alert(`⚠️ 농도를 기입하시오\n\n"${newGas}" 는 농도가 없는 혼합가스입니다.\n` +
+          `가스 품목 옆 조성 편집 버튼으로 각 성분의 농도(%)를 지정해주세요.`);
+    return;
+  }
 
   // 용기 목록 수집
   const rows = [...document.getElementById('peContBody').querySelectorAll('tr')];
@@ -6449,6 +7895,11 @@ function txnSelectMatched() {
 }
 
 function populateTxnLots() {
+  // 목록을 다시 그리면 체크가 풀리므로, 이미 고른 용기를 기억해 뒀다가 복원한다.
+  // (가스·규격을 바꾸거나 검색할 때 선택이 사라져 성적서에 용기번호가 빠지던 문제)
+  const _keepSel = new Set(
+    [...document.querySelectorAll('.txn-cyl-chk:checked')].map(c => c.dataset.lotno + '|' + c.value)
+  );
   const gas  = document.getElementById('txnGas').value;
   const size = document.getElementById('txnSize').value;
   const listEl = document.getElementById('txnLotList');
@@ -6537,6 +7988,14 @@ function populateTxnLots() {
   });
 
   available.sort((a,b) => (b.analysisDate||b.date||'').localeCompare(a.analysisDate||a.date||''));
+
+  // 이전에 고른 용기 복원
+  if (_keepSel.size) {
+    document.querySelectorAll('.txn-cyl-chk').forEach(cb => {
+      if (_keepSel.has(cb.dataset.lotno + '|' + cb.value)) cb.checked = true;
+    });
+    if (typeof updateTxnTotalSelected === 'function') updateTxnTotalSelected();
+  }
 
   const countEl = document.getElementById('txnLotCount');
   if (countEl) countEl.textContent = `출고 가능 LOT ${available.length}개` +
@@ -6671,6 +8130,7 @@ function saveTxn() {
   const memo = document.getElementById('txnMemo').value;
 
   if (!gas || !size || !comp) { alert('가스, 규격, 업체를 모두 선택해주세요.'); return; }
+  if (!checkStockBaseDate(date, '출고/조정')) return;
 
   let inv = inventory.find(r => r.gas === gas && r.size === size && r.company === comp);
   if (!inv) {
@@ -6689,6 +8149,14 @@ function saveTxn() {
     const byLot = getTxnSelectedByLot();
     const lotKeys = Object.keys(byLot);
     const totalSelected = Object.values(byLot).reduce((s,arr) => s + arr.length, 0);
+
+    // 용기번호가 비어 있는 LOT이 있으면 저장하지 않는다 (성적서에 용기번호가 빠짐)
+    const emptyLots = lotKeys.filter(k => !byLot[k] || !byLot[k].length);
+    if (emptyLots.length) {
+      alert(`⚠️ 용기번호가 선택되지 않은 LOT 이 있습니다.\n\n  ${emptyLots.join('\n  ')}\n\n` +
+            `용기를 다시 선택한 뒤 저장해주세요.`);
+      return;
+    }
 
     // LOT 선택이 있으면 LOT별로 각각 로그 저장
     if (lotKeys.length > 0) {
@@ -6747,6 +8215,17 @@ function saveTxn() {
     const dEmpty = empty > 0 ? empty : -full;
     if (inv.full < full) {
       if (!confirm(`⚠️ 실병 재고(${inv.full}개)보다 많은 ${full}개 출고입니다.\n\n계속하시겠습니까?`)) return;
+    }
+    // LOT·용기번호를 고르지 않으면 성적서에 용기번호가 나오지 않는다
+    if (curTxnType === 'ship' && full > 0) {
+      if (!confirm(
+        `⚠️ LOT·용기번호를 선택하지 않았습니다.\n\n` +
+        `이대로 저장하면 이 출고건으로 성적서를 발행할 때\n` +
+        `용기번호(cylinder NO)가 비어 있게 됩니다.\n\n` +
+        `아래 "출고 LOT · 실린더 선택"에서 용기를 고르시면\n` +
+        `성적서에 용기번호가 자동으로 들어갑니다.\n\n` +
+        `그래도 LOT 없이 출고하시겠습니까?`
+      )) return;
     }
     inv.full  = inv.full  + dFull;
     inv.empty = inv.empty + dEmpty;
@@ -7075,6 +8554,9 @@ function loadClosingSnapshot() {
   const actual = saved ? JSON.parse(JSON.stringify(saved.actual || {})) : {};
 
   // 화면에 입력 중이던(아직 저장 안 한) 실사값은 덮어쓰지 않고 보존
+  document.querySelectorAll('.cl-lv').forEach(inp => {
+    if (inp.value !== '') actual['_lv_' + inp.dataset.key] = parseFloat(inp.value);
+  });
   document.querySelectorAll('.cl-in').forEach(inp => {
     if (inp.value === '') return;
     const cat = inp.dataset.cat, key = inp.dataset.key, field = inp.dataset.field;
@@ -7125,7 +8607,18 @@ function loadClosingSnapshot() {
       <td style="font-size:12px;font-weight:700">${t.label}</td>
       <td style="font-size:11px;color:var(--text3)">${t.unit}</td>
       <td class="num" style="color:var(--text3)">${t.sysVal}</td>
-      <td><input type="number" step="0.01" class="cl-in" data-cat="tank" data-key="${t.key}" value="${aVal}" placeholder="실측" style="width:90px;text-align:right" oninput="recalcClosing()"></td>
+      <td>
+        ${TANK_LV_CHART[t.key] ? `
+          <input type="number" step="10" class="cl-lv" data-key="${t.key}" value="${actual['_lv_'+t.key] ?? ''}"
+                 placeholder="레벨" title="레벨계를 읽은 값(mmAq)"
+                 style="width:80px;text-align:right" oninput="onClosingLv(this)">
+          <span style="font-size:10px;color:var(--text3);margin-left:3px">mmAq</span>
+          <div class="cl-lvkg" data-key="${t.key}" style="font-size:11px;color:var(--accent);font-family:var(--mono);margin-top:2px">
+            ${aVal !== '' ? Number(aVal).toLocaleString(undefined,{maximumFractionDigits:1}) + ' kg' : '—'}
+          </div>
+          <input type="hidden" class="cl-in" data-cat="tank" data-key="${t.key}" value="${aVal}">`
+        : `<input type="number" step="0.01" class="cl-in" data-cat="tank" data-key="${t.key}" value="${aVal}" placeholder="실측" style="width:90px;text-align:right" oninput="recalcClosing()">`}
+      </td>
       <td class="num cl-diff" data-for="tank|${t.key}">${diff!==null?fmtDiff(diff):'—'}</td>
       <td class="num cl-loss" data-for="tank|${t.key}">${loss!==null?fmtLoss(loss):'—'}</td>
     </tr>`;
@@ -7296,6 +8789,10 @@ function saveClosing() {
   if (!date) { alert('마감 날짜를 선택해주세요.'); return; }
 
   const actual = {};
+  // 레벨(mmAq)로 읽은 탱크는 그 레벨값도 함께 저장한다 (나중에 조회·검증용)
+  document.querySelectorAll('.cl-lv').forEach(inp => {
+    if (inp.value !== '') actual['_lv_' + inp.dataset.key] = parseFloat(inp.value);
+  });
   document.querySelectorAll('.cl-in').forEach(inp => {
     const cat = inp.dataset.cat, key = inp.dataset.key, field = inp.dataset.field;
     const val = inp.value;
@@ -7535,6 +9032,8 @@ function cylM3PerBtl() {
   return pvtM3(CYL_VOL_L, CYL_FILL_BAR) - pvtM3(CYL_VOL_L, CYL_WASTE_BAR);
 }
 function cylKgPerBtl(density) { return cylM3PerBtl() * density; }
+// 실린더 원재료 1병에 들어있는 kg — BOM 값을 그대로 쓴다 (m³ 환산 없음)
+function cylStockKgPerBtl(key) { return getBomKg(key); }
 
 function calcHeConv() {
   const kg = parseFloat(document.getElementById('heConvKg').value);
@@ -7565,6 +9064,8 @@ function calcRawCartM3() {
 function getRawKey(gasName) {
   if (!gasName) return null;
   const g = gasName;
+  // 혼합가스는 단일 원재료로 매핑하면 안 된다 (성분별로 따로 차감해야 함)
+  if (isMixGas(g)) return null;
   if (!g.startsWith('혼합')) {
     if (g.includes('He')) return 'He';
     if (g.includes('N₂') || g.includes('N2')) return 'N2';
@@ -7660,6 +9161,9 @@ function m3ToKg(m3, key) {
   if (key === 'Ar')  return m3 / AR_KG_TO_M3;
   if (key === 'H2')  return m3 * H2_DENSITY;
   if (key === 'O2')  return m3 * O2_DENSITY;
+  // CO₂·CH₄ 가 빠져 있어 혼합가스 생산 시 이 성분들이 0kg 으로 계산되던 문제 보완
+  if (key === 'CO2') return m3 * CO2_DENSITY;
+  if (key === 'CH4') return m3 * CH4_DENSITY_G;
   return 0;
 }
 
@@ -7669,26 +9173,35 @@ function calcProductionConsumption(gas, sizeL, fillBar, qty) {
   const result = [];
   const T = 25;
 
-  if (gas.startsWith('혼합')) {
+  if (isMixGas(gas)) {
     // 혼합가스: 성분별 비율로 분배
-    const comps = parseMixComponents(gas);
-    const totalM3PerCyl = pvtM3(sizeL, fillBar); // 총 충전량
+    // (예전에는 구형식 '혼합 [...]' 만 인식해, 신형식 '5%CO₂+35%N₂+He' 는
+    //  단일가스로 취급되어 첫 성분 100% 로 잘못 차감되던 문제가 있었음)
+    const comps0 = parseMixComponents(gas);
+    // % 가 없는 성분(Balance)은 나머지 비율을 배분한다
+    const named = comps0.filter(c => c.pct > 0);
+    const balancers = comps0.filter(c => !(c.pct > 0));
+    const usedPct = named.reduce((s, c) => s + c.pct, 0);
+    const restPct = Math.max(0, 100 - usedPct);
+    const comps = comps0.map(c => (c.pct > 0)
+      ? c
+      : { ...c, pct: balancers.length ? restPct / balancers.length : 0 });
+
     comps.forEach(c => {
       const key = symToRawKey(c.sym);
       if (!key || c.pct <= 0) return;
-      const compM3PerCyl = totalM3PerCyl * c.pct / 100;
-      const compM3Total  = compM3PerCyl * qty;
-      const compKgTotal  = m3ToKg(compM3Total, key);
-      result.push({ key, sym:c.sym, pct:c.pct, m3PerCyl:compM3PerCyl, kgTotal:compKgTotal, qty });
+      // 성분이 100% 일 때의 1병당 kg × 농도 비율
+      const kgPerCyl    = bomKgPerCyl(key, sizeL, fillBar) * c.pct / 100;
+      const compKgTotal = kgPerCyl * qty;
+      result.push({ key, sym:c.sym, pct:c.pct, kgPerCyl, kgTotal:compKgTotal, qty });
     });
   } else {
     // 단일가스
     const key = getRawKey(gas);
     if (!key) return result;
-    const m3PerCyl  = pvtM3(sizeL, fillBar);
-    const m3Total   = m3PerCyl * qty;
-    const kgTotal   = m3ToKg(m3Total, key);
-    result.push({ key, sym:key, pct:100, m3PerCyl, kgTotal, qty });
+    const kgPerCyl = bomKgPerCyl(key, sizeL, fillBar);
+    const kgTotal  = kgPerCyl * qty;
+    result.push({ key, sym:key, pct:100, kgPerCyl, kgTotal, qty });
   }
   return result;
 }
@@ -7700,6 +9213,21 @@ function calcProductionConsumption(gas, sizeL, fillBar, qty) {
 //  대신 차감 전후를 비교해 "실제로 얼마가 줄었는지"를 이력에 남기고,
 //  이력을 삭제할 때 그만큼 다시 더해주는 방식으로 복원한다.
 // ══════════════════════════════════════════════════════════════
+// 성분명 → 성적서 표준 성분 키 (He/THC/O2/H2O/N2)
+function getCompKey(name) {
+  // 정규화: 대문자, 점 제거, 유니코드 숫자 변환
+  const n = name.toUpperCase()
+    .replace(/\./g, '')          // T.H.C → THC
+    .replace(/[₂₄]/g, c => c === '₂' ? '2' : '4')
+    .replace(/\s/g, '');         // 공백 제거
+  if (n === 'HE' || (n.includes('HE') && !n.includes('T') && !n.includes('O') && !n.includes('N'))) return 'He';
+  if (n.includes('THC') || n.includes('CH4')) return 'THC';
+  if ((n.startsWith('O2') || n === 'O2') && !n.includes('H')) return 'O2';
+  if (n.includes('H2O') || n.includes('H2O') || n.includes('수분')) return 'H2O';
+  if (n.startsWith('N2') || n === 'N2') return 'N2';
+  return null;
+}
+
 // 용기 항목에서 번호만 안전하게 꺼낸다.
 // 저장 형태가 문자열/숫자/객체로 제각각이라 예전 코드는 번호가 비면 객체를 그대로
 // 반환해 화면에 [object Object] 가 찍히는 문제가 있었다.
@@ -7808,10 +9336,12 @@ function deductRawFromProduction(consumption) {
 
     if (c.key === 'H2' || c.key === 'O2') {
       // 실린더 원재료: kg → 필요 병 수 계산
-      const kgPerBtl  = cylKgPerBtl(c.key === 'H2' ? H2_DENSITY : O2_DENSITY);
+      // 재고는 공업용/고순도로 나뉘므로, 생산 화면에서 고른 등급 키를 쓴다.
+      const stockKey  = c.stockKey || (c.key + '_pure');
+      const kgPerBtl  = cylStockKgPerBtl(c.key);   // 1병당 kg (BOM)
       const btlNeeded = kgNeed / kgPerBtl;
       const btlWhole  = Math.ceil(btlNeeded); // 올림 (병 단위)
-      const cur = rawMaterials[c.key] || { btl:0, kg:0 };
+      const cur = rawMaterials[stockKey] || { btl:0, kg:0 };
       // 잔량 kg에서 차감, 부족하면 병 개방
       let remKg = cur.kg;
       let remBtl = cur.btl;
@@ -7838,32 +9368,42 @@ function deductRawFromProduction(consumption) {
       }
 
       // 잔량이 폐기 기준 이하면 병 차감
-      const wasteKgThreshold = c.key === 'H2' ? cylM3PerBtl()*H2_DENSITY*(10/130) : cylM3PerBtl()*O2_DENSITY*(10/130);
-      const wastePressureKg  = pvtM3(CYL_VOL_L, CYL_WASTE_BAR) * (c.key === 'H2' ? H2_DENSITY : O2_DENSITY);
-      if (remKg > 0 && remKg <= wastePressureKg) {
-        warn = (warn||'') + ` 💡 ${c.key} 잔압 부족 (${remKg.toFixed(2)}kg ≈ ${(remKg/( c.key==='H2'?H2_DENSITY:O2_DENSITY)/CYL_VOL_L*ATM_KGF*1000/98.0665/25/273.15*25+273.15).toFixed(1)}bar 추정) → 1병 폐기`;
+      // 폐기 기준: 1병 kg 중 10bar 상당분 이하 (130bar 기준 비율)
+      const wasteKg = kgPerBtl * (CYL_WASTE_BAR + ATM_KGF) / (BOM_BASE_BAR + ATM_KGF);
+      if (remKg > 0 && remKg <= wasteKg) {
+        warn = (warn||'') + ` 💡 ${c.key} 잔량 ${remKg.toFixed(2)}kg ≤ ${wasteKg.toFixed(2)}kg → 1병 폐기`;
         remBtl--;
         remKg = 0;
       }
 
-      rawMaterials[c.key] = { btl: Math.max(0, remBtl), kg: Math.max(0, remKg) };
-      deducted.push({ ...c, usedBtl, remainKg: Math.max(0, remKg), remainBtl: Math.max(0, remBtl), warn });
+      rawMaterials[stockKey] = { btl: Math.max(0, remBtl), kg: Math.max(0, remKg) };
+      deducted.push({ ...c, src: stockKey, usedBtl, remainKg: Math.max(0, remKg), remainBtl: Math.max(0, remBtl), warn });
 
-    } else if (c.key === 'CO2') {
-      let remKg  = rawMaterials.CO2 || 0;
-      let btlUsed = 0;
-      let needKg  = kgNeed;
+    } else if (c.key === 'CO2' || c.key === 'CH4') {
+      // CO₂·CH₄ 도 병 단위 재고. 화면에서 고른 등급에서 차감한다.
+      const stockKey = c.stockKey || (c.key === 'CH4' ? 'CH4' : 'CO2_pure');
+      const kgPerBtl = cylStockKgPerBtl(c.key);   // 1병당 kg (BOM)
+      const wasteKg  = (c.key === 'CO2') ? CO2_WASTE_KG
+                     : kgPerBtl * (CYL_WASTE_BAR + ATM_KGF) / (BOM_BASE_BAR + ATM_KGF);
+      const cur = rawMaterials[stockKey] || { btl:0, kg:0 };
+      let remKg  = cur.kg  || 0;
+      let remBtl = cur.btl || 0;
+      let needKg = kgNeed;
+      let usedBtl = 0;
       while (needKg > 0) {
         if (remKg >= needKg) { remKg -= needKg; needKg = 0; }
-        else { needKg -= remKg; remKg = CO2_KG_PER_BTL; btlUsed++; }
+        else {
+          needKg -= remKg; remKg = 0;
+          if (remBtl > 0) { remBtl--; usedBtl++; remKg = kgPerBtl; }
+          else { warn = `⚠️ ${c.sym} 재고 부족`; break; }
+        }
       }
-      // 잔량 2kg 이하 → 폐기
-      if (remKg > 0 && remKg <= CO2_WASTE_KG) {
-        warn = `💡 CO₂ 잔량 ${remKg.toFixed(1)}kg ≤ ${CO2_WASTE_KG}kg → 1병 폐기`;
-        remKg = 0;
+      if (remKg > 0 && remKg <= wasteKg) {
+        warn = (warn || '') + ` 💡 ${c.sym} 잔량 ${remKg.toFixed(1)}kg ≤ ${wasteKg.toFixed(1)}kg → 1병 폐기`;
+        remBtl--; remKg = 0;
       }
-      rawMaterials.CO2 = Math.max(0, remKg);
-      deducted.push({ ...c, remainKg: Math.max(0, remKg), warn });
+      rawMaterials[stockKey] = { btl: Math.max(0, remBtl), kg: Math.max(0, remKg) };
+      deducted.push({ ...c, src: stockKey, usedBtl, remainKg: Math.max(0, remKg), remainBtl: Math.max(0, remBtl), warn });
 
     } else if (c.key === 'He') {
       // He — 출처에 따라 ISO Tank(kg) 또는 카트리지(m³) 차감
@@ -9569,6 +11109,32 @@ function checkOrderItem(comp, gas, size, qty) {
   const compFull  = inv?.full  || 0;
   const compEmpty = inv?.empty || 0;
 
+  // ── 각인 기준 공병 확인 ─────────────────────────────────
+  // 품명이 정확히 같지 않아도, 각인 성분이 맞으면 충전할 수 있다.
+  //   예) 발주 "10%CH₄+Ar"  ←  각인 [Ar/CH₄] 공병으로 생산 가능
+  const stampRows = inventory.filter(r => r.size === size && (r.empty || 0) > 0 && canFillInto(r.gas, gas));
+  const ownStamp   = stampRows.filter(r => r.company === comp);
+  const otherStamp = stampRows.filter(r => r.company !== comp);
+  const ownStampEmpty   = ownStamp.reduce((s,r) => s + (r.empty||0), 0);
+  const otherStampEmpty = otherStamp.reduce((s,r) => s + (r.empty||0), 0);
+  const stampNames = [...new Set(stampRows.map(r => r.gas))].join(', ');
+
+  // 업체 실병이 모자랄 때, 각인 공병으로 생산 가능한지 먼저 본다
+  if (compFull < qty) {
+    const need = qty - compFull;
+    if (ownStampEmpty >= need) {
+      return { gas, size, qty, status:'make',
+        message: `생산 가능 — ${comp} 각인 공병 ${ownStampEmpty}개 보유`,
+        detail: `${stampNames} 공병으로 ${need}개 충전${compFull ? ` (실병 ${compFull}개 + 생산 ${need}개)` : ''}` };
+    }
+    if (ownStampEmpty + otherStampEmpty >= need) {
+      const selfNeed = need - ownStampEmpty;
+      return { gas, size, qty, status:'make',
+        message: `자가병으로 생산 가능 — 타 보유 공병 ${otherStampEmpty}개`,
+        detail: `${stampNames}${ownStampEmpty ? ` · ${comp} 공병 ${ownStampEmpty}개 + 자가병 ${selfNeed}개` : ` 자가병 ${selfNeed}개 사용`}` };
+    }
+  }
+
   // 상태 판정
   if (compFull >= qty) {
     // ✅ 해당 업체 실병 충분
@@ -9906,7 +11472,11 @@ function updateIncMixPreview(group) {
   if (!group) return;
   const comps = getIncMixComps(group).filter(Boolean);
   const preview = group.querySelector('.inc-mix-preview');
-  preview.textContent = comps.length ? '각인: ' + comps.join(' / ') : '—';
+  if (!comps.length) { preview.textContent = '—'; return; }
+  const nm = buildStampName(comps);
+  preview.textContent = comps.length >= 2
+    ? `${nm}  → 혼합가스 전용 공병`
+    : `${nm}  → 단일가스 공병`;
 }
 
 function getIncMixComps(group) {
@@ -9920,10 +11490,71 @@ function getIncMixComps(group) {
   }).filter(Boolean);
 }
 
+// ══════════════════════════════════════════════════════════════
+//  공병 각인 관리
+//  · 각인이 1개면 단일가스 공병  (예: "N₂")
+//  · 각인이 2개 이상이면 혼합가스 공병 (예: "각인 [Ar/CH₄]")
+//    → 단일가스로는 충전할 수 없고, 그 성분들로 이뤄진 혼합가스만 충전 가능
+// ══════════════════════════════════════════════════════════════
+
+// 성분 기호를 통일 (N2 → N₂ 등)
+function normSym(s) {
+  if (!s) return '';
+  const t = String(s).trim().toUpperCase().replace(/\s+/g, '');
+  const map = { 'HE':'He', 'N2':'N₂', 'N₂':'N₂', 'AR':'Ar', 'H2':'H₂', 'H₂':'H₂',
+                'O2':'O₂', 'O₂':'O₂', 'CO2':'CO₂', 'CO₂':'CO₂', 'CH4':'CH₄', 'CH₄':'CH₄',
+                'AIR':'Air', 'CO':'CO', 'SF6':'SF₆', 'SF₆':'SF₆' };
+  return map[t] || String(s).trim();
+}
+
+// 각인 성분 배열 → 공병 품명
+//   1개  → "N₂"              (단일 공병)
+//   2개+ → "각인 [Ar/CH₄]"   (혼합 공병, 성분은 가나다순 고정)
+function buildStampName(comps) {
+  const list = [...new Set((comps || []).map(normSym).filter(Boolean))].sort();
+  if (!list.length) return '';
+  if (list.length === 1) return list[0];
+  return '각인 [' + list.join('/') + ']';
+}
+
+// 공병 품명에서 각인 성분 목록을 꺼낸다
+function stampCompsOf(gasName) {
+  if (!gasName) return [];
+  const g = String(gasName);
+  let m = g.match(/^각인\s*\[(.+)\]$/);
+  if (m) return m[1].split('/').map(normSym).filter(Boolean);
+  m = g.match(/^혼합\s*\[(.+)\]$/);            // 구형식 호환
+  if (m) return m[1].split(/[\/]/).map(s => normSym(s.split(/\s+/)[0])).filter(Boolean);
+  if (isMixGas(g)) {                              // "5%CO₂+35%N₂+He" 같은 제품명
+    return parseMixComponents(g).map(c => normSym(c.sym)).filter(Boolean);
+  }
+  // 단일가스 제품명 ("Ar — 고순도" 등)
+  const k = getRawKey(g);
+  if (k) return [normSym(k)];
+  return [];
+}
+
+// 이 공병이 "혼합가스 전용"인가 (각인 2개 이상)
+function isStampMixCyl(gasName) {
+  return stampCompsOf(gasName).length >= 2;
+}
+
+// 생산하려는 가스를 이 공병에 충전할 수 있는가
+//   · 제품 성분이 공병 각인 안에 모두 들어있어야 한다
+//   · 각인이 2개 이상인 공병에는 단일가스를 채울 수 없다
+function canFillInto(stampGas, productGas) {
+  const stamp = stampCompsOf(stampGas);
+  const prod  = stampCompsOf(productGas);
+  if (!stamp.length || !prod.length) return false;
+  if (stamp.length >= 2 && prod.length === 1) return false;   // 혼합 공병에 단일가스 ✗
+  return prod.every(p => stamp.includes(p));
+}
+
 function buildMixGasNameFromGroup(group) {
   const comps = getIncMixComps(group);
   if (!comps.length) return '';
-  return '혼합 [' + comps.join(' / ') + ']';
+  // 각인 1개면 단일 공병, 2개 이상이면 혼합 전용 공병
+  return buildStampName(comps);
 }
 
 function saveIncoming() {
@@ -9933,6 +11564,7 @@ function saveIncoming() {
   const memo=document.getElementById('incMemo').value;
   if (!date){alert('날짜를 입력해주세요.');return;}
   if (!comp){alert('업체를 선택해주세요.');return;}
+  if (!checkStockBaseDate(date, '공병 입고')) return;
   if (!type){alert('가스 종류를 선택해주세요.');return;}
 
   const items=[];
@@ -9952,7 +11584,7 @@ function saveIncoming() {
       const note=group.querySelector('.inc-mix-note')?.value.trim()||'';
       if(!size||qty<=0)return;
       const gas=buildMixGasNameFromGroup(group);
-      if(gas==='혼합 []')return;
+      if(!gas)return;
       items.push({gas,size,qty,note});
     });
   }
@@ -10500,6 +12132,12 @@ function saveAnInfoEdit() {
   if (!newGas || newGas === '__NEW_MIX__') { alert('가스 품목을 선택해주세요.'); return; }
   if (!newSize) { alert('규격을 선택해주세요.'); return; }
   if (!newComp) { alert('업체를 선택해주세요.'); return; }
+  if (isMixWithoutPct(newGas)) {
+    alert(`⚠️ 농도를 기입하시오\n\n"${newGas}" 는 농도가 없는 혼합가스입니다.\n` +
+          `성적서에 농도가 빠지므로 이대로 저장할 수 없습니다.\n\n` +
+          `가스 품목 옆 "🧪 조성" 버튼으로 농도(%)를 지정해주세요.`);
+    return;
+  }
 
   const oldGas = currentAnLog.gas;
   const lotNo = currentAnLog.lotNo;
@@ -10741,6 +12379,38 @@ function saveAnalysis() {
   const memo          = document.getElementById('anMemo').value.trim();
 
   if (!analysisDate) { alert('분석일자를 입력해주세요.'); return; }
+
+  // 단일가스는 성적서 양식의 항목이 정해져 있다.
+  // 엉뚱한 성분이 들어가면 THC 자리 등에 잘못 찍히므로 저장 전에 알린다.
+  {
+    const g = currentAnLog.gas || '';
+    const isMixG = isMixGas(g);
+    if (!isMixG) {
+      const main = g.startsWith('He') ? 'He' : (g.startsWith('N₂') || g.startsWith('N2')) ? 'N2'
+                 : g.startsWith('Ar') ? 'Ar' : null;
+      const allow = { He: ['He','THC','O2','H2O','N2'],
+                      N2: ['N2','O2','H2O'],
+                      Ar: ['Ar','O2','H2O'] }[main];
+      if (allow) {
+        const names = [...document.querySelectorAll('#anItemBody .an-name')].map(i => i.value.trim()).filter(Boolean);
+        const odd = names.filter(n => {
+          const k = getCompKey(n);
+          if (main === 'Ar' && /^AR$/i.test(n.replace(/\s/g,''))) return false;   // Ar 주성분
+          return !k || !allow.includes(k);
+        });
+        if (odd.length) {
+          if (!confirm(
+            `⚠️ "${g}" 성적서에 들어가지 않는 항목이 있습니다.\n\n` +
+            `  ${odd.join(', ')}\n\n` +
+            `이 가스의 표준 항목: ${allow.join(' / ')}\n\n` +
+            `이대로 저장하면 성적서에서 엉뚱한 자리(예: T.H.C 자리)에 찍힙니다.\n` +
+            `항목명을 고친 뒤 저장하시는 것을 권합니다.\n\n` +
+            `그래도 저장하시겠습니까?`
+          )) return;
+        }
+      }
+    }
+  }
 
   // LOT 대표 분석 항목 — value가 0이거나 빈 항목 자동 제거 (balance 제외)
   const items = [...document.querySelectorAll('#anItemBody tr')].map(tr => ({
@@ -11217,17 +12887,86 @@ function confirmCertDownload() {
 // ═══════════ 업체·출고일 기준 성적서 일괄 발행 ═══════════
 function openBatchCert(presetComp, presetDate) {
   // 출고 이력에 등장하는 업체 목록
-  const shipComps = [...new Set(logs.filter(l => l.type === 'ship' && l.lotNo).map(l => l.company).filter(Boolean))].sort();
+  // LOT 없이 저장된 출고건도 있으므로 lotNo 조건을 걸지 않는다.
+  const shipLogsAll = logs.filter(l => l.type === 'ship');
+  let shipComps = [...new Set(shipLogsAll.map(l => l.company).filter(Boolean))].sort();
+
+  // 출고 이력이 아예 없으면 거래처 + 재고 업체라도 보여준다 (선택 자체가 막히지 않도록)
+  const fallback = !shipComps.length;
+  if (fallback) {
+    shipComps = [...new Set([...(clients || []), ...inventory.map(r => r.company)])].filter(Boolean).sort();
+  }
+
   const compSel = document.getElementById('batchCertComp');
   compSel.innerHTML = '<option value="">업체 선택</option>' +
     shipComps.map(c => `<option value="${c}" ${c === presetComp ? 'selected' : ''}>${c}</option>`).join('');
 
+  const statusEl0 = document.getElementById('batchCertStatus');
+  if (statusEl0) statusEl0.textContent = '';
+  console.log('[일괄발행] 전체 이력', logs.length, '건 / 출고', shipLogsAll.length, '건 / 업체', shipComps.length, '개');
+
   document.getElementById('batchCertDate').value      = presetDate || today();
   document.getElementById('batchCertIssueDate').value = presetDate || today();
   document.getElementById('batchCertValve').value     = 'W22 - # -RH';
-  document.getElementById('batchCertStatus').textContent = '';
-
   document.getElementById('batchCertModal').style.display = 'flex';
+
+  // 업체가 지정돼 있으면 그 업체의 출고일 목록을 채운다
+  if (presetComp) {
+    onBatchCertCompChange();
+    if (presetDate) {
+      const ds = document.getElementById('batchCertDateSel');
+      if (ds) ds.value = presetDate;
+      document.getElementById('batchCertDate').value = presetDate;
+      document.getElementById('batchCertIssueDate').value = presetDate;
+    }
+  } else {
+    const ds = document.getElementById('batchCertDateSel');
+    if (ds) ds.innerHTML = '<option value="">업체를 먼저 선택</option>';
+  }
+  batchCertSearch();
+}
+
+// 업체를 고르면 그 업체의 출고일 목록을 채운다 (날짜를 몰라도 고를 수 있게)
+function onBatchCertCompChange() {
+  const comp = document.getElementById('batchCertComp').value;
+  const sel  = document.getElementById('batchCertDateSel');
+  if (!sel) return;
+
+  if (!comp) {
+    sel.innerHTML = '<option value="">업체를 먼저 선택</option>';
+    batchCertSearch();
+    return;
+  }
+
+  // 그 업체의 출고일 (최근 순)
+  const dates = [...new Set(
+    logs.filter(l => l.type === 'ship' && l.company === comp).map(l => l.date).filter(Boolean)
+  )].sort().reverse();
+
+  if (!dates.length) {
+    sel.innerHTML = '<option value="">출고 이력 없음</option>';
+    batchCertSearch();
+    return;
+  }
+
+  sel.innerHTML = '<option value="">출고일 선택</option>' + dates.map(d => {
+    const cnt = logs.filter(l => l.type === 'ship' && l.company === comp && l.date === d).length;
+    return `<option value="${d}">${d}  (${cnt}건)</option>`;
+  }).join('');
+
+  // 가장 최근 출고일로 자동 선택
+  sel.value = dates[0];
+  document.getElementById('batchCertDate').value = dates[0];
+  document.getElementById('batchCertIssueDate').value = dates[0];
+  batchCertSearch();
+}
+
+// 출고일 드롭다운에서 고르면 날짜 입력칸에도 반영
+function onBatchCertDateSel() {
+  const d = document.getElementById('batchCertDateSel').value;
+  if (!d) return;
+  document.getElementById('batchCertDate').value = d;
+  document.getElementById('batchCertIssueDate').value = d;
   batchCertSearch();
 }
 
@@ -11247,27 +12986,147 @@ function batchCertSearch() {
     return;
   }
 
-  const shipLogs = logs.filter(l => l.type === 'ship' && l.lotNo && l.company === comp && l.date === date);
+  // LOT 없는 출고건도 보여준다 (여기서 LOT·용기번호를 채울 수 있도록)
+  const shipLogs = logs.filter(l => l.type === 'ship' && l.company === comp && l.date === date);
   if (!shipLogs.length) {
-    listEl.innerHTML = `<div style="color:var(--text3);text-align:center;padding:16px">${date} · ${comp} 출고 이력(LOT 포함)이 없습니다</div>`;
+    listEl.innerHTML = `<div style="color:var(--text3);text-align:center;padding:16px">${date} · ${comp} 출고 이력이 없습니다</div>`;
     return;
   }
 
+  let badCnt = 0;
   listEl.innerHTML = shipLogs.map(l => {
+    // LOT 이 없는 출고건 — 여기서 지정할 수 있게 안내한다
+    if (!l.lotNo) {
+      badCnt++;
+      return `
+        <label style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:rgba(248,81,73,.08);border-radius:6px;margin-bottom:6px;opacity:.9">
+          <input type="checkbox" disabled style="width:15px;height:15px">
+          <span style="font-family:var(--mono);color:var(--danger);min-width:150px">LOT 없음</span>
+          <span style="flex:1">${l.gas}</span>
+          <span style="font-family:var(--mono);color:var(--text2)">${l.size}</span>
+          <span style="font-family:var(--mono);color:var(--danger)">출고 ${Math.abs(l.dFull || 0)}병</span>
+          <button class="btn btn-sm" style="padding:2px 8px;font-size:11px;background:rgba(248,81,73,.2);border:1px solid var(--danger);color:var(--danger)"
+                  onclick="event.preventDefault();assignShipLot('${l.id}')">🔗 LOT 지정</button>
+        </label>`;
+    }
     const entry = analysisData.find(a => a.lotNo === l.lotNo);
     const hasAn = !!entry;
-    const cylCnt = (l.cylinders || []).length;
+    // 용기번호를 안전하게 뽑는다 (빈 값·[object Object] 등 걸러냄)
+    const rawCyls = l.cylinders || [];
+    const goodCyls = rawCyls.map(cylNoOf).filter(v => v && !_isBadCylValue(v));
+    const cylCnt = goodCyls.length;
+    // 출고 수량과 용기번호 개수가 맞는지
+    const shipQty = Math.abs(l.dFull || 0);
+    const mismatch = shipQty > 0 && cylCnt !== shipQty;
+    const noCyl = cylCnt === 0;
+    if (mismatch || noCyl) badCnt++;
+
+    const cylTag = noCyl
+      ? `<span style="font-family:var(--mono);color:var(--danger);font-weight:700" title="용기번호가 저장되지 않았습니다">⚠️ 용기번호 없음</span>`
+      : mismatch
+        ? `<span style="font-family:var(--mono);color:var(--warn);font-weight:700" title="출고 ${shipQty}병인데 용기번호는 ${cylCnt}개입니다">⚠️ ${cylCnt}병 / 출고 ${shipQty}병</span>`
+        : `<span style="font-family:var(--mono);color:var(--text3)">${cylCnt}병</span>`;
+
+    const usable = hasAn && !noCyl;
     return `
-      <label style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:var(--bg2);border-radius:6px;margin-bottom:6px;cursor:${hasAn ? 'pointer' : 'not-allowed'};opacity:${hasAn ? 1 : .5}">
-        <input type="checkbox" class="batch-cert-chk" value="${l.id}" ${hasAn ? 'checked' : 'disabled'}
+      <label style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:${(mismatch||noCyl)?'rgba(210,153,34,.10)':'var(--bg2)'};border-radius:6px;margin-bottom:6px;cursor:${usable ? 'pointer' : 'not-allowed'};opacity:${usable ? 1 : .55}">
+        <input type="checkbox" class="batch-cert-chk" value="${l.id}" ${usable ? 'checked' : 'disabled'}
           style="width:15px;height:15px;accent-color:var(--accent)">
         <span style="font-family:var(--mono);font-weight:700;color:var(--accent2);min-width:150px">${l.lotNo}</span>
         <span style="flex:1">${l.gas}</span>
         <span style="font-family:var(--mono);color:var(--text2)">${l.size}</span>
-        <span style="font-family:var(--mono);color:var(--text3)">${cylCnt}병</span>
+        ${cylTag}
         <span style="font-size:11px;color:${hasAn ? 'var(--accent)' : 'var(--warn)'}">${hasAn ? '✓ 분석완료' : '분석 미입력'}</span>
+        ${(mismatch||noCyl) ? `<button class="btn btn-sm" style="padding:2px 8px;font-size:11px;background:rgba(210,153,34,.2);border:1px solid var(--warn);color:var(--warn)" onclick="event.preventDefault();fixShipCyls('${l.id}')">✏️ 용기번호 수정</button>` : ''}
       </label>`;
-  }).join('');
+  }).join('') + (badCnt ? `
+      <div style="margin-top:8px;padding:10px 14px;background:rgba(210,153,34,.12);border:1px solid var(--warn);border-radius:6px;font-size:12px;color:var(--warn);line-height:1.7">
+        ⚠️ <strong>${badCnt}건의 용기번호가 출고 수량과 맞지 않습니다.</strong><br>
+        이대로 발행하면 성적서에 용기번호가 빠지거나 모자란 채로 나갑니다.
+        <strong>✏️ 용기번호 수정</strong>으로 채운 뒤 발행해주세요.
+      </div>` : '');
+}
+
+// LOT 없이 저장된 출고건에 LOT 을 지정한다
+function assignShipLot(logId) {
+  const l = logs.find(x => x.id === logId);
+  if (!l) { alert('출고 이력을 찾을 수 없습니다.'); return; }
+  const qty = Math.abs(l.dFull || 0);
+
+  // 같은 가스·규격으로 생산된 LOT 목록 (출고일 이전 생산분)
+  const cands = logs
+    .filter(p => p.type === 'produce' && p.lotNo && p.gas === l.gas && p.size === l.size)
+    .filter(p => (p.date || '') <= (l.date || ''))
+    .sort((a,b) => (b.date || '').localeCompare(a.date || ''))
+    .slice(0, 20);
+
+  if (!cands.length) {
+    alert(`${l.gas} · ${l.size} 로 생산된 LOT 을 찾을 수 없습니다.\n\n생산 이력을 먼저 확인해주세요.`);
+    return;
+  }
+
+  const listTxt = cands.map((p, i) => {
+    const cyls = (p.containers || []).map(cylNoOf).filter(v => v && !_isBadCylValue(v));
+    return `${i + 1}. ${p.lotNo}  (${p.date}, 생산 ${cyls.length}병)`;
+  }).join('\n');
+
+  const pick = prompt(
+    `LOT 없이 저장된 출고건입니다.\n` +
+    `${l.date} · ${l.company} · ${l.gas} · ${l.size} · 출고 ${qty}병\n\n` +
+    `어느 LOT 인지 번호를 입력하세요.\n\n${listTxt}`,
+    '1'
+  );
+  if (pick === null) return;
+  const idx = parseInt(pick, 10) - 1;
+  if (!(idx >= 0 && idx < cands.length)) { alert('목록에 있는 번호를 입력해주세요.'); return; }
+
+  const p = cands[idx];
+  // 그 LOT 에서 아직 출고되지 않은 용기번호를 찾아 채운다
+  const prodCyls = (p.containers || []).map(cylNoOf).filter(v => v && !_isBadCylValue(v));
+  const used = new Set();
+  logs.filter(x => x.type === 'ship' && x.lotNo === p.lotNo && x.id !== l.id).forEach(x => {
+    (x.cylinders || []).forEach(c => { const n = cylNoOf(c); if (n) used.add(n); });
+  });
+  const avail = prodCyls.filter(n => !used.has(n));
+  const pickCyls = avail.slice(0, qty);
+
+  if (!confirm(
+    `${p.lotNo} 로 지정합니다.\n\n` +
+    `용기번호 ${pickCyls.length}개를 함께 채웁니다:\n  ${pickCyls.join(', ') || '(사용 가능한 번호 없음)'}\n` +
+    `${pickCyls.length < qty ? `\n⚠️ 출고 ${qty}병인데 ${pickCyls.length}개만 남아 있습니다.\n` : ''}` +
+    `\n계속하시겠습니까?`
+  )) return;
+
+  l.lotNo = p.lotNo;
+  l.cylinders = pickCyls;
+  if (window._invalidateCylCache) window._invalidateCylCache();
+  save(STORE_KEY_LOG, logs);
+  batchCertSearch();
+  alert(`✅ ${p.lotNo} 로 지정하고 용기번호 ${pickCyls.length}개를 채웠습니다.`);
+}
+
+// 출고 이력의 용기번호를 직접 고친다
+function fixShipCyls(logId) {
+  const l = logs.find(x => x.id === logId);
+  if (!l) { alert('출고 이력을 찾을 수 없습니다.'); return; }
+  const cur = (l.cylinders || []).map(cylNoOf).filter(Boolean).join(', ');
+  const qty = Math.abs(l.dFull || 0);
+  const input = prompt(
+    `${l.lotNo}\n${l.gas} · ${l.size} · ${l.company}\n출고 수량: ${qty}병\n\n` +
+    `용기번호를 쉼표로 구분해 입력하세요.\n(예: NK00104, 449400, 037423)`,
+    cur
+  );
+  if (input === null) return;
+  const list = input.split(/[,\s]+/).map(s => s.trim()).filter(Boolean);
+  if (!list.length) { alert('용기번호를 1개 이상 입력해주세요.'); return; }
+  if (qty > 0 && list.length !== qty) {
+    if (!confirm(`출고 수량은 ${qty}병인데 용기번호는 ${list.length}개입니다.\n\n그래도 저장하시겠습니까?`)) return;
+  }
+  l.cylinders = list;
+  if (window._invalidateCylCache) window._invalidateCylCache();
+  save(STORE_KEY_LOG, logs);
+  batchCertSearch();
+  alert(`✅ 용기번호 ${list.length}개 저장했습니다.`);
 }
 
 const CERT_BAT_CP949_PAIRS = [44032,45217,44060,45235,44228,45288,44256,45293,44277,45304,44536,45527,44592,45538,45001,45791,45716,46274,45768,46287,45796,46297,45800,46300,45803,46301,45824,46315,45908,46325,46020,46517,46104,46535,46108,46536,46121,46539,46160,46542,47196,47054,47308,47073,47732,47337,47784,47344,47785,47345,48064,47559,48120,47564,48148,47577,48156,47583,48320,47791,48372,47800,49345,48115,49436,48301,49444,48307,49457,48314,49464,48316,49468,48318,49472,48319,49496,48327,49548,48338,49549,48339,49569,48347,49688,48374,49845,48576,49884,48579,49885,48580,49892,48583,50504,48840,50630,48888,50640,49057,50641,49058,50741,49097,50756,49103,50836,49124,50857,49131,50948,49319,50976,49327,51012,49339,51032,49351,51060,49356,51068,49359,51077,49364,51080,49366,51109,49381,51200,49402,51201,49403,51204,49404,51217,49570,51221,49572,51228,49574,51452,49622,51473,49631,51648,49654,51649,49655,52264,49911,52404,50108,52649,50150,52824,50337,53356,50601,53552,50637,54028,50884,54056,50896,54252,50935,54260,50938,54616,51151,54624,51154,54637,51159,54644,51160,54665,51168,54840,51363,54872,51375,54980,51396];
@@ -11732,7 +13591,7 @@ async function saveBatchCertsToFolder() {
       if (statusEl) statusEl.textContent = `⏳ 저장 중... (${i + 1}/${selIds.length}) ${log.lotNo}`;
 
       const shipEntry = { ...entry, company: comp, size: log.size || entry.size };
-      const cyls = (log.cylinders || []).filter(Boolean);
+      const cyls = (log.cylinders || []).map(cylNoOf).filter(v => v && !_isBadCylValue(v));
       shipEntry.containers = cyls.map(no => ({ container: no }));
       const isAir = shipEntry.gas.toLowerCase().includes('air') || shipEntry.gas.startsWith('Air');
       const fp = (isMixGas(shipEntry.gas) || isAir) ? 110 : 120;
@@ -11823,8 +13682,13 @@ async function downloadBatchCerts() {
 
     // 출고건 기준 entry 구성: 업체·규격·실린더를 출고 로그 그대로 사용
     const shipEntry = { ...entry, company: comp, size: log.size || entry.size };
-    const cyls = (log.cylinders || []).filter(Boolean);
+    // 용기번호를 안전하게 추출한다 (빈 값·[object Object] 등이 섞여 있으면 성적서에 이상하게 찍힘)
+    const cyls = (log.cylinders || []).map(cylNoOf).filter(v => v && !_isBadCylValue(v));
     shipEntry.containers = cyls.map(no => ({ container: no }));
+    if (!cyls.length) {
+      console.warn('[일괄발행] 용기번호 없음 — 건너뜀:', log.lotNo);
+      fail++; continue;
+    }
 
     // Filling Pressure: 가스별 자동 (Air는 110, 혼합 110, 순수 120)
     const isAir = shipEntry.gas.toLowerCase().includes('air') || shipEntry.gas.startsWith('Air');
@@ -12105,7 +13969,7 @@ function publishBatchCertPDF() {
     const entry = analysisData.find(a => a.lotNo === log.lotNo);
     if (!entry) { skipped++; return; }
     const shipEntry = { ...entry, company: comp, size: log.size || entry.size };
-    const cyls = (log.cylinders || []).filter(Boolean);
+    const cyls = (log.cylinders || []).map(cylNoOf).filter(v => v && !_isBadCylValue(v));
     const isAir = shipEntry.gas.toLowerCase().includes('air') || shipEntry.gas.startsWith('Air');
     const fp = ((typeof isMixGas === 'function' && isMixGas(shipEntry.gas)) || isAir) ? 110 : 120;
     pages.push(buildCertPageHTML(shipEntry, comp, issueDate, cyls, valveType, fp));
@@ -12450,19 +14314,6 @@ async function generateCertExcel(entry, company, issueDate, selectedCyls, valveT
     N2:  { specRow:25, resRow:25, specCol:'M', resCol:'Y' },
   };
 
-  function getCompKey(name) {
-    // 정규화: 대문자, 점 제거, 유니코드 숫자 변환
-    const n = name.toUpperCase()
-      .replace(/\./g, '')          // T.H.C → THC
-      .replace(/[₂₄]/g, c => c === '₂' ? '2' : '4')
-      .replace(/\s/g, '');         // 공백 제거
-    if (n === 'HE' || (n.includes('HE') && !n.includes('T') && !n.includes('O') && !n.includes('N'))) return 'He';
-    if (n.includes('THC') || n.includes('CH4')) return 'THC';
-    if ((n.startsWith('O2') || n === 'O2') && !n.includes('H')) return 'O2';
-    if (n.includes('H2O') || n.includes('H2O') || n.includes('수분')) return 'H2O';
-    if (n.startsWith('N2') || n === 'N2') return 'N2';
-    return null;
-  }
 
   // 분석 항목 처리
   const items = entry.items || [];
@@ -12632,9 +14483,35 @@ async function generateCertExcel(entry, company, issueDate, selectedCyls, valveT
       cells[`AK${r}`] = { clear: true };
     }
 
-    // 일반 성분 배치: 주성분(%)은 Row 21, impurity(ppm)는 Row 22~
-    normalItems.forEach((item, idx) => {
-      const rowNum = 21 + idx;
+    // 일반 성분 배치
+    // 단일가스는 성적서 양식의 행이 정해져 있다.
+    //   21=주성분  22=THC  23=O₂  24=H₂O  25=N₂
+    // 순서대로 넣으면 엉뚱한 성분이 THC 자리에 들어가므로, 성분명으로 행을 정한다.
+    const FIXED_ROW = { THC:22, O2:23, H2O:24, N2:25 };
+    const usedRows = new Set();
+    const placed = [];
+    if (!isMix) {
+      const mainKey = isHe ? 'He' : isN2 ? 'N2' : isAr ? 'Ar' : null;
+      normalItems.forEach(item => {
+        const key = getCompKey(item.name || '');
+        // 주성분은 21행
+        if ((key && key === mainKey) || (!placed.length && (item.unit || '').includes('%'))) {
+          if (!usedRows.has(21)) { placed.push({ item, rowNum:21 }); usedRows.add(21); return; }
+        }
+        const fixed = FIXED_ROW[key];
+        if (fixed && !usedRows.has(fixed)) { placed.push({ item, rowNum:fixed }); usedRows.add(fixed); return; }
+        // 정해진 자리가 없는 성분은 남은 행에
+        for (let r = 22; r <= 25; r++) {
+          if (!usedRows.has(r)) { placed.push({ item, rowNum:r }); usedRows.add(r); return; }
+        }
+      });
+    } else {
+      normalItems.forEach((item, idx) => {
+        if (21 + idx <= 25) placed.push({ item, rowNum: 21 + idx });
+      });
+    }
+
+    placed.forEach(({ item, rowNum }) => {
       if (rowNum > 25) return;
 
       const isPercent = (item.unit || '').includes('%');
@@ -14111,6 +15988,19 @@ function deleteSelectedLogs() {
   });
   const revertList = Object.values(revert).filter(r => r.full !== 0 || r.empty !== 0);
 
+  const emptyBack = {};
+  targets.forEach(l => {
+    if (!l.emptyFrom) return;
+    const k = `${l.emptyFrom.gas}|${l.emptyFrom.size}|${l.emptyFrom.company}`;
+    emptyBack[k] = (emptyBack[k] || 0) + (l.emptyFrom.qty || 0);
+  });
+  const emptySummary = Object.keys(emptyBack).length
+    ? '\n\n[공병 복원]\n' + Object.entries(emptyBack).map(([k,v]) => {
+        const [g,s,c] = k.split('|');
+        return `  ${g} · ${s} · ${c}\n     공병 +${v}`;
+      }).join('\n')
+    : '';
+
   const summary = revertList.length
     ? '\n\n[재고 자동 복원]\n' + revertList.map(r =>
         `  ${r.gas} · ${r.size} · ${r.company}\n` +
@@ -14151,7 +16041,20 @@ function deleteSelectedLogs() {
     ? `\n\n⚠️ 아래 생산 이력은 원재료가 자동 복원되지 않습니다.\n   (같은 생산건의 일부만 삭제하거나, 이 기능 적용 전에 저장된 이력)\n   ${rawPartial.join(', ')}\n   → 원재료 입고에서 직접 조정해주세요.`
     : '';
 
-  if (!confirm(`선택한 ${ids.length}건의 이력을 삭제합니다.${summary}${rawSummary}${rawWarn}\n\n계속하시겠습니까?`)) return;
+  if (!confirm(`선택한 ${ids.length}건의 이력을 삭제합니다.${summary}${emptySummary}${rawSummary}${rawWarn}\n\n계속하시겠습니까?`)) return;
+
+  // 다른 재고에서 뺀 공병도 되돌린다 (제품명과 공병 각인이 다른 경우)
+  targets.forEach(l => {
+    const ef = l.emptyFrom;
+    if (!ef) return;
+    let inv = inventory.find(x => x.id === ef.id)
+           || inventory.find(x => x.gas === ef.gas && x.size === ef.size && x.company === ef.company);
+    if (!inv) {
+      inv = { id: uid(), gas: ef.gas, size: ef.size, company: ef.company, dinoCode:'', full:0, empty:0, liter:null };
+      inventory.push(inv);
+    }
+    inv.empty = (inv.empty || 0) + (ef.qty || 0);
+  });
 
   // 재고 복원
   let created = 0;
