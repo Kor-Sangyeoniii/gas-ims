@@ -4973,6 +4973,13 @@ function _isBadCylValue(v) {
   return s === '' || s.toLowerCase().includes('object object');
 }
 
+// 용기번호 자리에 순번(1,2,3…)이 들어간 것으로 보이는가
+// 실제 용기번호는 보통 영문+숫자 조합이거나 5자리 이상이다.
+function _looksLikeSeqNo(v) {
+  const s = String(v ?? '').trim();
+  return /^\d{1,2}$/.test(s);   // 1~2자리 순수 숫자
+}
+
 function checkCylData() {
   const el = document.getElementById('cylCheckResult');
   if (el) el.innerHTML = '<span style="color:var(--text3)">⏳ 점검 중...</span>';
@@ -9252,7 +9259,10 @@ function cylNoOf(c) {
   if (typeof c === 'string') return c.trim();
   if (typeof c === 'number') return String(c);
   if (typeof c === 'object') {
-    const cand = c.container ?? c.cylinder ?? c.cylNo ?? c.name ?? c.no;
+    // ⚠️ c.no(순번)는 절대 쓰지 않는다.
+    //    생산 이력에 용기번호가 없을 때 순번(1,2,3…)이 용기번호로 둔갑해
+    //    성적서에 그대로 찍히던 문제가 있었다.
+    const cand = c.container ?? c.cylinder ?? c.cylNo ?? c.name;
     if (cand == null) return '';
     if (typeof cand === 'object') return '';
     const s = String(cand).trim();
@@ -13021,12 +13031,17 @@ function batchCertSearch() {
     const noCyl = cylCnt === 0;
     if (mismatch || noCyl) badCnt++;
 
+    // 용기번호 자리에 순번(1,2,3…)이 들어간 건 실제 번호가 아니다
+    const seqLike = goodCyls.filter(_looksLikeSeqNo).length;
     const cylTag = noCyl
       ? `<span style="font-family:var(--mono);color:var(--danger);font-weight:700" title="용기번호가 저장되지 않았습니다">⚠️ 용기번호 없음</span>`
-      : mismatch
-        ? `<span style="font-family:var(--mono);color:var(--warn);font-weight:700" title="출고 ${shipQty}병인데 용기번호는 ${cylCnt}개입니다">⚠️ ${cylCnt}병 / 출고 ${shipQty}병</span>`
-        : `<span style="font-family:var(--mono);color:var(--text3)">${cylCnt}병</span>`;
+      : seqLike
+        ? `<span style="font-family:var(--mono);color:var(--danger);font-weight:700" title="용기번호가 아니라 순번이 저장되어 있습니다">🚫 순번 ${seqLike}개 (${goodCyls.slice(0,6).join(', ')})</span>`
+        : mismatch
+          ? `<span style="font-family:var(--mono);color:var(--warn);font-weight:700" title="출고 ${shipQty}병인데 용기번호는 ${cylCnt}개입니다">⚠️ ${cylCnt}병 / 출고 ${shipQty}병</span>`
+          : `<span style="font-family:var(--mono);color:var(--text3)">${cylCnt}병</span>`;
 
+    if (seqLike) badCnt++;
     const usable = hasAn && !noCyl;
     return `
       <label style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:${(mismatch||noCyl)?'rgba(210,153,34,.10)':'var(--bg2)'};border-radius:6px;margin-bottom:6px;cursor:${usable ? 'pointer' : 'not-allowed'};opacity:${usable ? 1 : .55}">
@@ -13037,7 +13052,7 @@ function batchCertSearch() {
         <span style="font-family:var(--mono);color:var(--text2)">${l.size}</span>
         ${cylTag}
         <span style="font-size:11px;color:${hasAn ? 'var(--accent)' : 'var(--warn)'}">${hasAn ? '✓ 분석완료' : '분석 미입력'}</span>
-        ${(mismatch||noCyl) ? `<button class="btn btn-sm" style="padding:2px 8px;font-size:11px;background:rgba(210,153,34,.2);border:1px solid var(--warn);color:var(--warn)" onclick="event.preventDefault();fixShipCyls('${l.id}')">✏️ 용기번호 수정</button>` : ''}
+        ${(mismatch||noCyl||seqLike) ? `<button class="btn btn-sm" style="padding:2px 8px;font-size:11px;background:rgba(210,153,34,.2);border:1px solid var(--warn);color:var(--warn)" onclick="event.preventDefault();fixShipCyls('${l.id}')">✏️ 용기번호 수정</button>` : ''}
       </label>`;
   }).join('') + (badCnt ? `
       <div style="margin-top:8px;padding:10px 14px;background:rgba(210,153,34,.12);border:1px solid var(--warn);border-radius:6px;font-size:12px;color:var(--warn);line-height:1.7">
