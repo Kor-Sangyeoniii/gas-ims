@@ -177,14 +177,97 @@ const FS_COL = 'gasims';
 // 키별 저장 확정 상태 — 서버 저장이 확인되지 않은 키는 동기화가 덮어쓰지 못하게 막는다
 window._pendingSave = window._pendingSave || {};
 
+// ══════════════════════════════════════════════════════════════
+//  용기번호 보호 — 저장 전 최종 방어선
+//  어떤 경로로 저장하든, 용기번호가 줄어들면 저장을 막는다.
+//  (2026-08 사고: 압축 기능이 4~7월 용기번호를 통째로 지움)
+// ══════════════════════════════════════════════════════════════
+window._cylGuard = { lastCount: null, blocked: 0 };
+
+function _guardCylCount(key, val) {
+  if (key !== 'gasims_log_v2' || !Array.isArray(val)) return true;
+  const now = _countCyls(val);
+  const prev = window._cylGuard.lastCount;
+
+  // 이전에 세어둔 값보다 크게 줄면 사고로 본다
+  if (prev != null && now < prev) {
+    const lost = prev - now;
+    // 이력을 실제로 삭제한 경우는 정상이므로, 이력 건수도 함께 본다
+    const okToShrink = window._cylGuard.allowShrink;
+    if (!okToShrink && lost > 0) {
+      window._cylGuard.blocked++;
+      console.error('[용기번호 보호] 저장 차단 — 용기번호가', prev, '→', now, '(', lost, '개 감소)');
+      if (window.showSaveFailure) {
+        window.showSaveFailure(key,
+          `용기번호 ${lost}개가 사라질 뻔해 저장을 막았습니다`,
+          '이력을 삭제하신 게 아니라면 새로고침 후 다시 시도해주세요. 데이터는 안전합니다.');
+      }
+      return false;
+    }
+  }
+  window._cylGuard.lastCount = now;
+  window._cylGuard.allowShrink = false;
+  saveCylSnapshot(val);   // 용기번호를 이 PC에 따로 보관
+  return true;
+}
+
+// 이력을 의도적으로 지울 때는 감소를 허용한다
+function allowCylShrink() { window._cylGuard.allowShrink = true; }
+
+// ── 용기번호 자동 스냅샷 ──────────────────────────────────
+// 용기번호가 들어있는 이력을 이 PC에 따로 보관해 둔다.
+// 서버 데이터가 잘못돼도 여기서 되살릴 수 있다.
+const CYL_SNAP_KEY = 'gasims_cyl_snapshot';
+
+function saveCylSnapshot(logsArr) {
+  try {
+    const snap = {};
+    (logsArr || []).forEach(l => {
+      const c = (l.containers || []).map(cylNoOf).filter(Boolean);
+      const s = (l.cylinders  || []).map(cylNoOf).filter(Boolean);
+      if (c.length || s.length) {
+        snap[l.id] = { lotNo: l.lotNo, date: l.date, type: l.type,
+                       c: c.length ? c : undefined, s: s.length ? s : undefined };
+      }
+    });
+    const cnt = Object.keys(snap).length;
+    const prev = getCylSnapshot();
+    // 기존 스냅샷보다 적으면 덮어쓰지 않는다 (손상된 상태를 저장하지 않도록)
+    if (Object.keys(prev).length > cnt) {
+      console.warn('[용기 스냅샷] 기존', Object.keys(prev).length, '건 > 현재', cnt, '건 — 유지');
+      return;
+    }
+    localStorage.setItem(CYL_SNAP_KEY, JSON.stringify({ at: new Date().toISOString(), data: snap }));
+  } catch (e) { console.warn('용기 스냅샷 저장 실패:', e); }
+}
+
+function getCylSnapshot() {
+  try {
+    const raw = localStorage.getItem(CYL_SNAP_KEY);
+    if (!raw) return {};
+    const j = JSON.parse(raw);
+    return j.data || {};
+  } catch (e) { return {}; }
+}
+
 window.fsSave = async function(key, val) {
+  // 용기번호가 줄어드는 저장은 막는다
+  if (!_guardCylCount(key, val)) return false;
+
   // 서버 저장이 확인될 때까지 "미확정" 표시 → 이 동안은 폴링/리스너가 로컬을 덮어쓰지 않음
   window._pendingSave[key] = true;
 
   // 이력은 서버로 보낼 때만 중복 필드를 뺀다 (화면 데이터는 그대로 유지)
-  // ⚠️ 압축 기능은 용기번호를 빈 객체로 만드는 버그가 있어 사용하지 않는다.
-  //    (2026-08 사고: 6~7월 생산 이력의 용기번호가 {} 로 뭉개짐)
-  const sendVal = val;
+  // 빈 값만 걷어내 용량을 줄인다. 용기번호가 하나라도 줄면 원본 그대로 저장한다.
+  let sendVal = val;
+  if (key === 'gasims_log_v2' && Array.isArray(val)) {
+    try {
+      const stripped = _stripEmptyForSave(val);
+      const before = _countCyls(val), after = _countCyls(stripped);
+      if (before === after) sendVal = stripped;
+      else console.error('[안전장치] 용기번호가 줄어 원본으로 저장합니다:', before, '→', after);
+    } catch (e) { console.warn('빈 값 정리 실패, 원본 저장:', e); }
+  }
 
   // ⚠️ Firestore 문서 크기 한도(1 MiB) 사전 검사
   //    초과하면 서버가 400으로 거부하므로, 미리 감지해 명확히 알린다.
@@ -324,11 +407,60 @@ window.fsEstimateSize = function(v) {
 //  용기 항목의 size/company는 대부분 LOT 값과 같고, no는 순서로 알 수 있어
 //  이 셋을 빼면 저장 용량이 절반 이하로 줄어든다.
 // ══════════════════════════════════════════════════════════════
-// ⚠️ 사용 중지된 함수 — 용기번호를 잃는 버그가 있었다.
-//    container 값이 없는 항목을 빈 객체 {} 로 만들어, 한 번 뭉개지면 되살릴 수 없었다.
-//    호출부는 모두 제거했으며, 예전 데이터 호환을 위해 정의만 남긴다.
+// ⚠️ 예전 압축 함수 — 용기번호를 잃는 버그가 있어 사용하지 않는다.
 function _compactLogsForSave(arr) {
-  return arr;   // 아무것도 하지 않는다
+  return arr;
+}
+
+// ══════════════════════════════════════════════════════════════
+//  저장 용량 줄이기 — 빈 값만 걷어낸다
+//  Firestore 는 문서 1개당 1MB 한도가 있다.
+//  값이 비어 있는 필드(''  null  [])는 없어도 되는 정보이므로 제외한다.
+//  ⚠️ container 등 값이 들어있는 필드는 절대 건드리지 않는다.
+// ══════════════════════════════════════════════════════════════
+const NEVER_STRIP = ['container', 'cylinder', 'cylNo', 'cylinders', 'containers', 'lotNo', 'id', 'gas', 'date', 'type'];
+
+function _isEmptyVal(v) {
+  return v === '' || v === null || v === undefined || (Array.isArray(v) && v.length === 0);
+}
+
+function _stripEmptyForSave(arr) {
+  if (!Array.isArray(arr)) return arr;
+  return arr.map(l => {
+    if (!l || typeof l !== 'object') return l;
+    const out = {};
+    for (const k in l) {
+      const v = l[k];
+      if (NEVER_STRIP.includes(k)) { out[k] = v; continue; }
+      if (_isEmptyVal(v)) continue;                       // 빈 값은 저장하지 않음
+      out[k] = v;
+    }
+    // 용기 항목도 같은 규칙 (단, container 는 무조건 보존)
+    if (Array.isArray(l.containers)) {
+      out.containers = l.containers.map(c => {
+        if (!c || typeof c !== 'object') return c;
+        const o = {};
+        for (const k in c) {
+          const v = c[k];
+          if (NEVER_STRIP.includes(k)) { o[k] = v; continue; }
+          if (_isEmptyVal(v)) continue;
+          o[k] = v;
+        }
+        return o;
+      });
+    }
+    return out;
+  });
+}
+
+// 저장 전 안전 확인 — 용기번호가 하나라도 줄면 저장하지 않는다
+function _countCyls(arr) {
+  let n = 0;
+  (arr || []).forEach(l => {
+    (l.containers || []).forEach(c => { if (cylNoOf(c)) n++; });
+    (l.cylinders  || []).forEach(c => { if (cylNoOf(c)) n++; });
+  });
+  return n;
 }
 
 function _expandLogsAfterLoad(arr) {
@@ -3096,7 +3228,7 @@ console.log('✅ Firebase 초기화 완료');
       <div style="font-size:12px;color:var(--text2);margin-bottom:12px;line-height:1.6">
         Firebase는 <strong>데이터 묶음 하나당 1 MB</strong> 한도가 있습니다. 이력이 쌓여 한도를 넘으면
         <strong style="color:var(--danger)">새 저장이 거부되어 입력한 내용이 사라집니다.</strong><br>
-        아래 <strong style="color:var(--accent)">압축해서 다시 저장</strong>을 누르면 데이터를 하나도 지우지 않고 용량이 절반 이하로 줄어듭니다.
+        저장 시 빈 값을 자동으로 걷어내 용량을 줄입니다. 데이터는 하나도 지워지지 않습니다.
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
         <button class="btn btn-primary" onclick="checkDataSize()">🔍 용량 진단</button>
@@ -3239,6 +3371,8 @@ console.log('✅ Firebase 초기화 완료');
           화면에 보이는 값이 아니라 <strong>서버에 저장된 그대로</strong>를 보여줍니다.
         </div>
         <button class="btn btn-danger" onclick="diagnoseCylLoss()">🚨 서버 원본 확인</button>
+        <button class="btn btn-success" style="margin-left:6px" onclick="restoreFromCylSnapshot()">💾 이 PC 보관본에서 되살리기</button>
+        <div id="cylSnapInfo" style="font-size:11px;color:var(--text3);margin-top:6px"></div>
         <div id="cylLossResult" style="font-size:12px;margin-top:10px"></div>
       </div>
 
@@ -3732,10 +3866,10 @@ function _checkDataSizeRun() {
     </table></div>
     ${over.length ? `<div style="margin-top:10px;padding:10px 14px;background:rgba(248,81,73,.12);border:1px solid var(--danger);border-radius:8px;color:var(--danger);font-size:12px;line-height:1.6">
       <strong>🚨 ${over.map(r=>r.label).join(', ')} 이(가) 1 MB 한도를 넘었습니다.</strong><br>
-      이것이 <strong>새 입력이 저장되지 않는 원인</strong>입니다. 아래 <strong>🗜 압축해서 다시 저장</strong>을 실행해주세요.
+      이것이 <strong>새 입력이 저장되지 않는 원인</strong>입니다. 최신 버전에서는 저장 시 빈 값을 자동으로 걷어내 용량을 줄입니다. 그래도 넘으면 오래된 이력을 정리해야 합니다.
     </div>` : near.length ? `<div style="margin-top:10px;padding:10px 14px;background:rgba(210,153,34,.12);border:1px solid var(--warn);border-radius:8px;color:var(--warn);font-size:12px">
       ⚠️ ${near.map(r=>r.label).join(', ')} 이(가) 한도에 근접했습니다.<br>
-      <strong>실제 Firebase 기준으로는 이미 한도를 넘었을 수 있습니다.</strong> 아래 <strong>🗜 압축해서 다시 저장</strong>을 실행해주세요.
+      <strong>실제 Firebase 기준으로는 이미 한도를 넘었을 수 있습니다.</strong> 저장 시 빈 값이 자동으로 정리됩니다.
     </div>` : `<div style="margin-top:10px;font-size:12px;color:var(--accent)">✅ 모든 데이터가 한도 내에 있습니다.</div>`}`;
 }
 
@@ -4652,6 +4786,69 @@ function applyGasRename(oldGas, newGasRaw) {
   renderAll && renderAll();
   alert(`✅ ${total}건 변경 완료\n\n  "${oldGas}" → "${newGas}"` +
         `${merged.length ? `\n(재고 ${merged.length}건은 기존 품목과 합쳤습니다)` : ''}`);
+}
+
+// 이 PC 보관본에서 용기번호를 되살린다
+function restoreFromCylSnapshot() {
+  const snap = getCylSnapshot();
+  const keys = Object.keys(snap);
+  if (!keys.length) { alert('이 PC에 보관된 용기번호가 없습니다.'); return; }
+
+  const plan = [];
+  logs.forEach(l => {
+    const s = snap[l.id];
+    if (!s) return;
+    const curC = (l.containers || []).map(cylNoOf).filter(Boolean).length;
+    const curS = (l.cylinders  || []).map(cylNoOf).filter(Boolean).length;
+    const needC = s.c && s.c.length > curC;
+    const needS = s.s && s.s.length > curS;
+    if (needC || needS) plan.push({ l, s, curC, curS });
+  });
+
+  if (!plan.length) { alert('되살릴 용기번호가 없습니다.\n(현재 데이터가 보관본보다 온전합니다)'); return; }
+
+  if (!confirm(
+    `이 PC 보관본에서 용기번호를 되살립니다.\n\n` +
+    `  대상 이력 : ${plan.length}건\n` +
+    plan.slice(0, 6).map(p => `   ${p.l.lotNo || '(LOT없음)'} ${p.l.date} : ` +
+      `${p.s.c ? `생산 ${p.curC}→${p.s.c.length}` : ''}${p.s.s ? ` 출고 ${p.curS}→${p.s.s.length}` : ''}`).join('\n') +
+    (plan.length > 6 ? `\n   ... 외 ${plan.length - 6}건` : '') +
+    `\n\n계속하시겠습니까?`
+  )) return;
+
+  let done = 0;
+  plan.forEach(({ l, s }) => {
+    if (s.c && s.c.length) {
+      l.containers = s.c.map((no, i) => {
+        const old = (l.containers || [])[i];
+        return (old && typeof old === 'object')
+          ? { ...old, container: no }
+          : { no: i + 1, container: no, size: l.size, company: l.company, pAfter: null, note: '' };
+      });
+    }
+    if (s.s && s.s.length) l.cylinders = s.s.slice();
+    done++;
+  });
+
+  if (window._invalidateCylCache) window._invalidateCylCache();
+  save(STORE_KEY_LOG, logs);
+  renderCylSnapInfo();
+  alert(`✅ ${done}건의 용기번호를 되살렸습니다.`);
+}
+
+function renderCylSnapInfo() {
+  const el = document.getElementById('cylSnapInfo');
+  if (!el) return;
+  try {
+    const raw = localStorage.getItem(CYL_SNAP_KEY);
+    if (!raw) { el.textContent = '이 PC 보관본: 없음'; return; }
+    const j = JSON.parse(raw);
+    const cnt = Object.keys(j.data || {}).length;
+    let cyls = 0;
+    Object.values(j.data || {}).forEach(v => { cyls += (v.c || []).length + (v.s || []).length; });
+    el.innerHTML = `이 PC 보관본: <strong style="color:var(--accent)">이력 ${cnt}건 · 용기번호 ${cyls}개</strong> ` +
+                   `<span style="color:var(--text3)">(${(j.at || '').slice(0,16).replace('T',' ')} 기준)</span>`;
+  } catch (e) { el.textContent = ''; }
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -5911,6 +6108,7 @@ function nav(id) {
       if (bd && sd && !sd.value) sd.value = bd;
     } catch(e) {}
     renderStockBaseNow();         // 현재 재고 기준일
+    renderCylSnapInfo();          // 용기번호 보관본 상태
     renderBomKg();                // 1병당 소모 kg 설정
     calcTankLv();                 // 레벨 환산 안내
     // 캔버스 초기화 (관리자 탭 진입 시)
@@ -16089,6 +16287,7 @@ function deleteSelectedLogs() {
   rawPlans.forEach(p => _applyRawDelta(p.delta, -1));
   if (rawPlans.length) save(STORE_KEY_RAW, rawMaterials);
 
+  allowCylShrink();   // 의도적인 이력 감소
   logs = logs.filter(l => !ids.includes(l.id));
   if (window._invalidateCylCache) window._invalidateCylCache();
   save(STORE_KEY_INV, inventory);
