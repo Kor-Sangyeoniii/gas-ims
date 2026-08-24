@@ -552,9 +552,37 @@ const LOG_SPLIT_PREFIX = 'gasims_log_';       // + YYYY-MM
 const LOG_SPLIT_FLAG   = 'gasims_log_split';  // 전환 완료 여부
 
 // 월별 분할을 쓰는 상태인가
+// ⚠️ 설정을 이 PC에만 두면 다른 PC 는 옛 방식으로 저장해 1MB 한도에 걸린다.
+//    그래서 서버에 월별 문서가 하나라도 있으면 모든 PC 가 자동으로 월별 모드가 된다.
+let _splitAutoDetected = false;
 function isLogSplitOn() {
+  if (_splitAutoDetected) return true;
   try { return localStorage.getItem(LOG_SPLIT_FLAG) === 'on'; } catch(e) { return false; }
 }
+
+// 서버에 월별 문서가 있는지 확인해 자동 전환한다 (앱 시작 시 1회)
+async function detectLogSplit() {
+  const now = new Date();
+  for (let i = 0; i < 6; i++) {
+    const dt = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const m = `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}`;
+    try {
+      const res = await fetch(`${FS_REST_BASE}/${logMonthKey(m)}?key=${FS_API_KEY}`);
+      window._readCount = (window._readCount || 0) + 1;
+      if (res.ok) {
+        const j = await res.json();
+        if (j.fields && j.fields.data) {
+          _splitAutoDetected = true;
+          try { localStorage.setItem(LOG_SPLIT_FLAG, 'on'); } catch(e) {}
+          console.log('[월별 분할] 서버에 월별 문서가 있어 자동으로 월별 모드로 동작합니다.');
+          return true;
+        }
+      }
+    } catch (e) {}
+  }
+  return false;
+}
+window.detectLogSplit = detectLogSplit;
 function setLogSplit(on) {
   try { localStorage.setItem(LOG_SPLIT_FLAG, on ? 'on' : 'off'); } catch(e) {}
 }
@@ -705,6 +733,9 @@ window.addEventListener('gasImsReady', () => {
     if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
     _restBusy = true;
     try {
+      // 서버에 월별 문서가 있으면 자동으로 월별 모드로 전환한다 (PC마다 설정할 필요 없음)
+      if (!isLogSplitOn()) { try { await detectLogSplit(); } catch (e) {} }
+
       // 월별 분할이 켜져 있으면 이력은 월별 문서에서 읽는다
       if (isLogSplitOn()) {
         try {
@@ -3968,7 +3999,14 @@ function checkDataSize() {
 function _checkDataSizeRun() {
   const LIMIT = window.FS_DOC_LIMIT || 1048576;
   const targets = [
-    ['이력(생산·출고·조정)', STORE_KEY_LOG,      _stripEmptyForSave(logs)],   // 실제 저장되는 형태로 계산
+    // 월별 분할이 켜져 있으면 한 달치 중 가장 큰 것을 기준으로 본다
+    ['이력(생산·출고·조정)', STORE_KEY_LOG,
+      (isLogSplitOn()
+        ? (() => { const by = splitLogsByMonth(logs);
+                   const ks = Object.keys(by);
+                   if (!ks.length) return [];
+                   return _stripEmptyForSave(by[ks.reduce((a,b) => by[a].length >= by[b].length ? a : b)]); })()
+        : _stripEmptyForSave(logs))],
     ['재고',                 STORE_KEY_INV,      inventory],
     ['분석·성적서',          STORE_KEY_ANALYSIS, analysisData],
     ['카트리지 이력',        STORE_KEY_CART_LOG, cartLogs],
