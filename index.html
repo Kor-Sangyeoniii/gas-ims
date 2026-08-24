@@ -243,7 +243,7 @@ function saveCylSnapshot(logsArr) {
 
 function getCylSnapshot() {
   try {
-    const raw = localStorage.getItem(CYL_SNAP_KEY);
+    const raw = localStorage.getItem('gasims_cyl_snapshot');
     if (!raw) return {};
     const j = JSON.parse(raw);
     return j.data || {};
@@ -577,6 +577,23 @@ function splitLogsByMonth(arr) {
   return by;
 }
 
+// 이 함수들은 다른 스크립트(관리자 화면 등)에서도 써야 하므로 전역으로 노출한다.
+// (모듈 스크립트는 스코프가 분리되어 있어 그냥 두면 not defined 오류가 난다)
+window.isLogSplitOn        = isLogSplitOn;
+window.setLogSplit         = setLogSplit;
+window.logMonthOf          = logMonthOf;
+window.logMonthKey         = logMonthKey;
+window.splitLogsByMonth    = splitLogsByMonth;
+window._isEmptyVal         = _isEmptyVal;
+window._stripEmptyForSave  = _stripEmptyForSave;
+window._countCyls          = _countCyls;
+window.allowCylShrink      = allowCylShrink;
+window.saveCylSnapshot     = saveCylSnapshot;
+window.getCylSnapshot      = getCylSnapshot;
+window._expandLogsAfterLoad = _expandLogsAfterLoad;
+window._compactLogsForSave = _compactLogsForSave;
+window._fromRestValue      = _fromRestValue;
+
 // 서버에서 월별 문서를 모두 읽어 합친다
 async function loadSplitLogs() {
   const months = new Set();
@@ -605,6 +622,7 @@ async function loadSplitLogs() {
   if (found.length) console.log('[월별 이력] 읽음:', found.join(' '));
   return out;
 }
+window.loadSplitLogs = loadSplitLogs;
 
 const FS_KEYS = [
   'gasims_inventory_v2','gasims_log_v2','gasims_raw_v1',
@@ -4915,15 +4933,47 @@ function applyGasRename(oldGas, newGasRaw) {
 // ══════════════════════════════════════════════════════════════
 function previewLogSplit() {
   const el = document.getElementById('logSplitResult');
+  if (!el) { alert('화면 요소를 찾을 수 없습니다. 새로고침 후 다시 시도해주세요.'); return; }
+  el.innerHTML = '<span style="color:var(--text3)">⏳ 계산 중...</span>';
+  setTimeout(() => { try { _previewLogSplitRun(el); }
+    catch (e) { console.error(e); el.innerHTML = `<span style="color:var(--danger)">❌ 오류: ${e.message || e}</span>`; } }, 30);
+}
+
+// Firestore 문서 크기를 정확히 잰다.
+// 재귀로 하면 이력이 많을 때 스택이 넘치므로 반복문(스택 배열)으로 처리한다.
+function _exactSize(root) {
+  const enc = (typeof TextEncoder !== 'undefined') ? new TextEncoder() : null;
+  const blen = s => enc ? enc.encode(s).length : new Blob([s]).size;
+  let total = 0;
+  const stack = [root];
+  while (stack.length) {
+    const v = stack.pop();
+    if (v === null || v === undefined) { total += 1; continue; }
+    const t = typeof v;
+    if (t === 'boolean') { total += 1; continue; }
+    if (t === 'number')  { total += 8; continue; }
+    if (t === 'string')  { total += blen(v) + 1; continue; }
+    if (Array.isArray(v)) { for (let i = 0; i < v.length; i++) stack.push(v[i]); continue; }
+    if (t === 'object') {
+      for (const k in v) { total += blen(k) + 1; stack.push(v[k]); }
+      continue;
+    }
+    total += 1;
+  }
+  return total;
+}
+
+function _previewLogSplitRun(el) {
   const by = splitLogsByMonth(logs);
   const months = Object.keys(by).sort();
+  if (!months.length) { el.innerHTML = '<span style="color:var(--warn)">이력이 없습니다.</span>'; return; }
   const rows = months.map(m => {
     const arr = by[m];
-    const size = window.fsEstimateSize(_stripEmptyForSave(arr));
+    const size = _exactSize(_stripEmptyForSave(arr));
     const cyl = _countCyls(arr);
     return { m, cnt: arr.length, size, cyl, pct: size / 1048576 * 100 };
   });
-  const totSize = window.fsEstimateSize(_stripEmptyForSave(logs));
+  const totSize = _exactSize(_stripEmptyForSave(logs));
 
   el.innerHTML = `
     <div style="margin-bottom:8px;line-height:1.8">
@@ -4948,6 +4998,8 @@ function previewLogSplit() {
 }
 
 async function applyLogSplit() {
+  const el0 = document.getElementById('logSplitResult');
+  try {
   const by = splitLogsByMonth(logs);
   const months = Object.keys(by).sort();
   const el = document.getElementById('logSplitResult');
@@ -4981,10 +5033,15 @@ async function applyLogSplit() {
       ${failed.length ? `<div style="color:var(--danger);font-size:11px;margin-top:6px">${failed.join('<br>')}</div>` : ''}
     </div>
     <div style="margin-top:10px;font-size:12px">이제 <strong>③ 대조 확인</strong> 을 눌러 숫자가 맞는지 확인해주세요.</div>`;
+  } catch (e) {
+    console.error(e);
+    if (el0) el0.innerHTML = `<span style="color:var(--danger)">❌ 오류: ${e.message || e}</span>`;
+  }
 }
 
 async function verifyLogSplit() {
   const el = document.getElementById('logSplitResult');
+  try {
   el.innerHTML = '<span style="color:var(--text3)">⏳ 서버에서 다시 읽어 대조하는 중...</span>';
 
   const server = await loadSplitLogs();
@@ -5015,6 +5072,10 @@ async function verifyLogSplit() {
       ${ok ? '이상 없으면 <strong>④ 저장 전환</strong> 을 눌러 월별 저장으로 바꿔주세요.'
            : '<span style="color:var(--danger)">차이가 있으므로 전환하지 마시고 알려주세요.</span>'}
     </div>`;
+  } catch (e) {
+    console.error(e);
+    el.innerHTML = `<span style="color:var(--danger)">❌ 오류: ${e.message || e}</span>`;
+  }
 }
 
 function toggleLogSplit() {
