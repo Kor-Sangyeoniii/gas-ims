@@ -254,6 +254,21 @@ window.fsSave = async function(key, val) {
   // 용기번호가 줄어드는 저장은 막는다
   if (!_guardCylCount(key, val)) return false;
 
+  // 월별 분할이 켜져 있으면 이력은 월별 문서에 저장한다
+  if (key === 'gasims_log_v2' && isLogSplitOn() && Array.isArray(val)) {
+    const by = splitLogsByMonth(val);
+    let allOk = true;
+    for (const m of Object.keys(by)) {
+      try {
+        const r = await window.fsSaveREST(logMonthKey(m), _stripEmptyForSave(by[m]));
+        if (r === false) allOk = false;
+      } catch (e) { allOk = false; console.warn('[월별 저장 실패]', m, e); }
+    }
+    if (window._pendingSave) window._pendingSave[key] = false;
+    if (window._localWriteAt) window._localWriteAt[key] = Date.now();
+    return allOk;
+  }
+
   // 서버 저장이 확인될 때까지 "미확정" 표시 → 이 동안은 폴링/리스너가 로컬을 덮어쓰지 않음
   window._pendingSave[key] = true;
 
@@ -524,6 +539,73 @@ window.fsLoad = async function(key, def) {
 };
 
 // ── 실시간 리스너 등록 (다른 기기 변경사항 즉시 반영)
+// ══════════════════════════════════════════════════════════════
+//  이력 월별 분할 저장
+//  Firestore 는 문서 1개당 1MB 한도가 있어, 이력이 쌓이면 저장이 막힌다.
+//  이력을 월별 문서로 나누면 한 달치가 200KB 수준이라 한도에 닿지 않는다.
+//
+//  문서 이름 : gasims_log_2026-04, gasims_log_2026-05 …
+//  기준      : 이력의 date(생산·출고 날짜). 저장한 시각이 아니다.
+//  원본      : gasims_log_v2 는 전환이 끝날 때까지 그대로 둔다.
+// ══════════════════════════════════════════════════════════════
+const LOG_SPLIT_PREFIX = 'gasims_log_';       // + YYYY-MM
+const LOG_SPLIT_FLAG   = 'gasims_log_split';  // 전환 완료 여부
+
+// 월별 분할을 쓰는 상태인가
+function isLogSplitOn() {
+  try { return localStorage.getItem(LOG_SPLIT_FLAG) === 'on'; } catch(e) { return false; }
+}
+function setLogSplit(on) {
+  try { localStorage.setItem(LOG_SPLIT_FLAG, on ? 'on' : 'off'); } catch(e) {}
+}
+
+// 이력의 소속 월 (날짜가 없으면 '기타')
+function logMonthOf(l) {
+  const d = (l && l.date) || '';
+  return /^\d{4}-\d{2}/.test(d) ? d.slice(0, 7) : 'etc';
+}
+function logMonthKey(m) { return LOG_SPLIT_PREFIX + m; }
+
+// 이력을 월별로 나눈다
+function splitLogsByMonth(arr) {
+  const by = {};
+  (arr || []).forEach(l => {
+    const m = logMonthOf(l);
+    if (!by[m]) by[m] = [];
+    by[m].push(l);
+  });
+  return by;
+}
+
+// 서버에서 월별 문서를 모두 읽어 합친다
+async function loadSplitLogs() {
+  const months = new Set();
+  // 이미 알고 있는 월 + 최근 24개월
+  (logs || []).forEach(l => months.add(logMonthOf(l)));
+  const now = new Date();
+  for (let i = 0; i < 24; i++) {
+    const dt = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    months.add(`${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}`);
+  }
+  months.add('etc');
+
+  const out = [];
+  const found = [];
+  for (const m of [...months].sort()) {
+    try {
+      const res = await fetch(`${FS_REST_BASE}/${logMonthKey(m)}?key=${FS_API_KEY}`);
+      window._readCount = (window._readCount || 0) + 1;
+      if (!res.ok) continue;                      // 404 = 그 달 문서 없음 (정상)
+      const j = await res.json();
+      if (!j.fields || !j.fields.data) continue;
+      const arr = _fromRestValue(j.fields.data);
+      if (Array.isArray(arr) && arr.length) { out.push(...arr); found.push(`${m}(${arr.length})`); }
+    } catch (e) { /* 개별 월 실패는 무시 */ }
+  }
+  if (found.length) console.log('[월별 이력] 읽음:', found.join(' '));
+  return out;
+}
+
 const FS_KEYS = [
   'gasims_inventory_v2','gasims_log_v2','gasims_raw_v1',
   'gasims_clients_v1','gasims_expire_v1',
@@ -605,7 +687,27 @@ window.addEventListener('gasImsReady', () => {
     if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
     _restBusy = true;
     try {
+      // 월별 분할이 켜져 있으면 이력은 월별 문서에서 읽는다
+      if (isLogSplitOn()) {
+        try {
+          const merged = await loadSplitLogs();
+          if (merged.length) {
+            const expanded = _expandLogsAfterLoad(merged);
+            if (!(window._pendingSave && window._pendingSave['gasims_log_v2'])) {
+              const myLast = (window._localWriteAt && window._localWriteAt['gasims_log_v2']) || 0;
+              if (!myLast || (Date.now() - myLast) >= 15000) {
+                logs = expanded;
+                localStorage.setItem('gasims_log_v2', JSON.stringify(logs));
+                if (window._invalidateCylCache) window._invalidateCylCache();
+                if (window.onFsUpdate) window.onFsUpdate('gasims_log_v2', logs);
+              }
+            }
+          }
+        } catch (e) { console.warn('[월별 이력 읽기 실패]', e); }
+      }
+
       for (const key of FS_KEYS) {
+        if (key === 'gasims_log_v2' && isLogSplitOn()) continue;   // 위에서 처리함
         try {
           const res = await fetch(`${FS_REST_BASE}/${key}?key=${FS_API_KEY}`);
           window._readCount = (window._readCount || 0) + 1;
@@ -3365,12 +3467,32 @@ console.log('✅ Firebase 초기화 완료');
       </div>
 
       <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:14px">
+        <div style="font-size:12px;font-weight:700;color:var(--accent2);margin-bottom:8px">📅 이력 월별 분할 저장</div>
+        <div style="font-size:12px;color:var(--text2);line-height:1.7;margin-bottom:10px">
+          이력이 한 문서에 다 들어가 <strong>1MB 한도</strong>에 걸리고 있습니다.
+          이를 <strong>월별 문서</strong>로 나누면 한 달치가 200KB 수준이라 한도에 닿지 않습니다.<br>
+          <span style="color:var(--text3);font-size:11px">
+            ※ 화면·조회는 지금과 완전히 동일합니다. 앱이 여러 달치를 합쳐서 보여줍니다.<br>
+            ※ 기존 <code>gasims_log_v2</code> 는 지우지 않고 그대로 둡니다.
+          </span>
+        </div>
+        <div class="flex-gap" style="gap:8px;flex-wrap:wrap">
+          <button class="btn btn-primary" onclick="previewLogSplit()">① 나눠질 내용 확인</button>
+          <button class="btn btn-success" onclick="applyLogSplit()">② 월별로 복사</button>
+          <button class="btn" style="background:var(--bg4);border:1px solid var(--border2);color:var(--text2)" onclick="verifyLogSplit()">③ 대조 확인</button>
+          <button class="btn btn-danger" onclick="toggleLogSplit()">④ 저장 전환</button>
+        </div>
+        <div id="logSplitResult" style="font-size:12px;margin-top:10px"></div>
+      </div>
+
+      <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:14px">
         <div style="font-size:12px;font-weight:700;color:var(--danger);margin-bottom:8px">🚨 용기번호 유실 진단</div>
         <div style="font-size:12px;color:var(--text2);line-height:1.7;margin-bottom:10px">
           <strong>Firebase 서버의 원본 데이터를 직접 읽어</strong> 용기번호가 실제로 어떻게 저장돼 있는지 확인합니다.<br>
           화면에 보이는 값이 아니라 <strong>서버에 저장된 그대로</strong>를 보여줍니다.
         </div>
         <button class="btn btn-danger" onclick="diagnoseCylLoss()">🚨 서버 원본 확인</button>
+        <button class="btn btn-primary" style="margin-left:6px" onclick="scanProdCylRecovery()">🔧 생산 용기번호 복구</button>
         <button class="btn btn-success" style="margin-left:6px" onclick="restoreFromCylSnapshot()">💾 이 PC 보관본에서 되살리기</button>
         <div id="cylSnapInfo" style="font-size:11px;color:var(--text3);margin-top:6px"></div>
         <div id="cylLossResult" style="font-size:12px;margin-top:10px"></div>
@@ -3828,7 +3950,7 @@ function checkDataSize() {
 function _checkDataSizeRun() {
   const LIMIT = window.FS_DOC_LIMIT || 1048576;
   const targets = [
-    ['이력(생산·출고·조정)', STORE_KEY_LOG,      logs],
+    ['이력(생산·출고·조정)', STORE_KEY_LOG,      _stripEmptyForSave(logs)],   // 실제 저장되는 형태로 계산
     ['재고',                 STORE_KEY_INV,      inventory],
     ['분석·성적서',          STORE_KEY_ANALYSIS, analysisData],
     ['카트리지 이력',        STORE_KEY_CART_LOG, cartLogs],
@@ -4786,6 +4908,258 @@ function applyGasRename(oldGas, newGasRaw) {
   renderAll && renderAll();
   alert(`✅ ${total}건 변경 완료\n\n  "${oldGas}" → "${newGas}"` +
         `${merged.length ? `\n(재고 ${merged.length}건은 기존 품목과 합쳤습니다)` : ''}`);
+}
+
+// ══════════════════════════════════════════════════════════════
+//  월별 분할 — 확인 · 복사 · 대조 · 전환
+// ══════════════════════════════════════════════════════════════
+function previewLogSplit() {
+  const el = document.getElementById('logSplitResult');
+  const by = splitLogsByMonth(logs);
+  const months = Object.keys(by).sort();
+  const rows = months.map(m => {
+    const arr = by[m];
+    const size = window.fsEstimateSize(_stripEmptyForSave(arr));
+    const cyl = _countCyls(arr);
+    return { m, cnt: arr.length, size, cyl, pct: size / 1048576 * 100 };
+  });
+  const totSize = window.fsEstimateSize(_stripEmptyForSave(logs));
+
+  el.innerHTML = `
+    <div style="margin-bottom:8px;line-height:1.8">
+      현재 한 문서에 <strong>${logs.length.toLocaleString()}건 · ${(totSize/1024).toFixed(0)} KB
+      (한도의 ${(totSize/1048576*100).toFixed(1)}%)</strong><br>
+      나누면 <strong style="color:var(--accent)">${months.length}개 문서</strong>가 됩니다.
+    </div>
+    <div class="tbl-wrap" style="max-height:320px"><table>
+      <thead><tr><th>월</th><th>문서 이름</th><th class="num">건수</th><th class="num">용기번호</th><th class="num">크기</th><th class="num">한도 대비</th></tr></thead>
+      <tbody>${rows.map(r => `<tr>
+        <td style="font-family:var(--mono)">${r.m}</td>
+        <td style="font-family:var(--mono);font-size:11px;color:var(--text3)">${logMonthKey(r.m)}</td>
+        <td class="num" style="font-family:var(--mono)">${r.cnt.toLocaleString()}</td>
+        <td class="num" style="font-family:var(--mono);color:var(--accent)">${r.cyl.toLocaleString()}</td>
+        <td class="num" style="font-family:var(--mono)">${(r.size/1024).toFixed(0)} KB</td>
+        <td class="num" style="font-family:var(--mono);color:${r.pct>85?'var(--warn)':'var(--accent)'}">${r.pct.toFixed(1)}%</td>
+      </tr>`).join('')}</tbody>
+    </table></div>
+    <div style="font-size:11px;color:var(--text3);margin-top:8px">
+      확인되셨으면 <strong>② 월별로 복사</strong> 를 눌러주세요. 원본은 그대로 둡니다.
+    </div>`;
+}
+
+async function applyLogSplit() {
+  const by = splitLogsByMonth(logs);
+  const months = Object.keys(by).sort();
+  const el = document.getElementById('logSplitResult');
+
+  if (!confirm(
+    `이력 ${logs.length.toLocaleString()}건을 ${months.length}개 월별 문서로 복사합니다.\n\n` +
+    `  ${months.join(', ')}\n\n` +
+    `기존 gasims_log_v2 는 그대로 두므로 되돌릴 수 있습니다.\n` +
+    `계속하시겠습니까?`
+  )) return;
+
+  el.innerHTML = '<span style="color:var(--text3)">⏳ 복사 중...</span>';
+  const done = [], failed = [];
+  for (const m of months) {
+    const key = logMonthKey(m);
+    try {
+      const ok = await window.fsSaveREST(key, _stripEmptyForSave(by[m]));
+      if (ok === false) throw new Error('저장 실패');
+      done.push(`${m}(${by[m].length})`);
+      el.innerHTML = `<span style="color:var(--text3)">⏳ 복사 중... ${done.length}/${months.length} — ${m}</span>`;
+    } catch (e) {
+      failed.push(`${m}: ${e.message || e}`);
+    }
+  }
+
+  el.innerHTML = `
+    <div style="line-height:1.8">
+      ${failed.length ? '⚠️' : '✅'} 복사 완료 — 성공 <strong>${done.length}</strong>개 문서
+      ${failed.length ? `<span style="color:var(--danger)"> · 실패 ${failed.length}개</span>` : ''}<br>
+      <span style="font-size:11px;color:var(--text3)">${done.join('  ')}</span>
+      ${failed.length ? `<div style="color:var(--danger);font-size:11px;margin-top:6px">${failed.join('<br>')}</div>` : ''}
+    </div>
+    <div style="margin-top:10px;font-size:12px">이제 <strong>③ 대조 확인</strong> 을 눌러 숫자가 맞는지 확인해주세요.</div>`;
+}
+
+async function verifyLogSplit() {
+  const el = document.getElementById('logSplitResult');
+  el.innerHTML = '<span style="color:var(--text3)">⏳ 서버에서 다시 읽어 대조하는 중...</span>';
+
+  const server = await loadSplitLogs();
+  const localCnt = logs.length, srvCnt = server.length;
+  const localCyl = _countCyls(logs), srvCyl = _countCyls(server);
+
+  // id 기준 대조
+  const localIds = new Set(logs.map(l => l.id));
+  const srvIds   = new Set(server.map(l => l.id));
+  const missing  = [...localIds].filter(id => !srvIds.has(id));
+
+  const ok = (srvCnt >= localCnt) && (srvCyl >= localCyl) && !missing.length;
+
+  el.innerHTML = `
+    <div style="padding:12px 16px;border-radius:8px;line-height:1.9;
+                background:${ok ? 'rgba(46,164,79,.1)' : 'rgba(248,81,73,.1)'};
+                border:1px solid ${ok ? 'var(--accent)' : 'var(--danger)'}">
+      <strong style="color:${ok ? 'var(--accent)' : 'var(--danger)'}">
+        ${ok ? '✅ 대조 결과 이상 없습니다' : '❌ 차이가 있습니다 — 전환하지 마세요'}
+      </strong><br>
+      이력 건수 : 이 PC <strong>${localCnt.toLocaleString()}</strong> / 서버(월별) <strong>${srvCnt.toLocaleString()}</strong>
+        ${srvCnt === localCnt ? '✅' : `<span style="color:var(--danger)">❌ ${srvCnt-localCnt}</span>`}<br>
+      용기번호 : 이 PC <strong>${localCyl.toLocaleString()}</strong> / 서버(월별) <strong>${srvCyl.toLocaleString()}</strong>
+        ${srvCyl === localCyl ? '✅' : `<span style="color:var(--danger)">❌ ${srvCyl-localCyl}</span>`}<br>
+      빠진 이력 : ${missing.length ? `<span style="color:var(--danger)">${missing.length}건</span>` : '없음 ✅'}
+    </div>
+    <div style="margin-top:10px;font-size:12px">
+      ${ok ? '이상 없으면 <strong>④ 저장 전환</strong> 을 눌러 월별 저장으로 바꿔주세요.'
+           : '<span style="color:var(--danger)">차이가 있으므로 전환하지 마시고 알려주세요.</span>'}
+    </div>`;
+}
+
+function toggleLogSplit() {
+  const on = isLogSplitOn();
+  if (on) {
+    if (!confirm('월별 저장을 끄고 기존 방식(gasims_log_v2)으로 되돌립니다.\n\n계속하시겠습니까?')) return;
+    setLogSplit(false);
+    alert('기존 방식으로 되돌렸습니다.');
+  } else {
+    if (!confirm(
+      '지금부터 이력을 월별 문서에 저장합니다.\n\n' +
+      '  · 화면과 조회는 그대로입니다\n' +
+      '  · 기존 gasims_log_v2 는 지우지 않습니다\n' +
+      '  · 문제가 있으면 이 버튼으로 다시 되돌릴 수 있습니다\n\n' +
+      '③ 대조 확인에서 이상 없음을 확인하셨나요?'
+    )) return;
+    setLogSplit(true);
+    alert('월별 저장으로 전환했습니다.\n\n이제 용량 한도 문제가 없습니다.');
+  }
+  document.getElementById('logSplitResult').innerHTML =
+    `<div style="color:var(--accent)">현재 저장 방식: <strong>${isLogSplitOn() ? '월별 분할' : '기존(단일 문서)'}</strong></div>`;
+}
+
+// ══════════════════════════════════════════════════════════════
+//  생산 이력 용기번호 복구
+//  생산 이력의 용기번호가 비어 있어도, 같은 LOT 의
+//  분석(성적서) 데이터와 출고 이력에는 용기번호가 남아 있다.
+//  그것을 모아 생산 이력에 되돌린다.
+// ══════════════════════════════════════════════════════════════
+let _prodRecoverPlan = null;
+
+function scanProdCylRecovery() {
+  const el = document.getElementById('cylLossResult');
+  el.innerHTML = '<span style="color:var(--text3)">⏳ 복구원을 찾는 중...</span>';
+
+  setTimeout(() => {
+    // LOT별 복구원 모으기 (순번처럼 보이는 값은 제외)
+    const pool = {};
+    const add = (lot, v) => {
+      const s = cylNoOf(v);
+      if (!lot || !s || _isBadCylValue(s) || _looksLikeSeqNo(s)) return;
+      if (!pool[lot]) pool[lot] = [];
+      if (!pool[lot].includes(s)) pool[lot].push(s);
+    };
+    (analysisData || []).forEach(a => (a.containers || []).forEach(c => add(a.lotNo, c)));
+    logs.filter(l => l.type === 'ship').forEach(l => (l.cylinders || []).forEach(c => add(l.lotNo, c)));
+
+    // 비어 있는 생산 이력 찾기
+    const targets = logs.filter(l => {
+      if (l.type !== 'produce') return false;
+      const cs = l.containers || [];
+      if (!cs.length) return false;
+      return !cs.some(c => cylNoOf(c) && !_isBadCylValue(cylNoOf(c)));
+    }).sort((a,b) => (a.date||'').localeCompare(b.date||''));
+
+    if (!targets.length) {
+      el.innerHTML = '<span style="color:var(--accent)">✅ 용기번호가 비어 있는 생산 이력이 없습니다.</span>';
+      _prodRecoverPlan = null;
+      return;
+    }
+
+    // 같은 LOT 이 여러 건이면 앞 건이 쓴 번호는 뒤 건에서 제외
+    const used = {};
+    const plan = [];
+    targets.forEach(l => {
+      const lot = l.lotNo;
+      const need = (l.containers || []).length;
+      if (!used[lot]) used[lot] = new Set();
+      const avail = (pool[lot] || []).filter(n => !used[lot].has(n));
+      const pick = avail.slice(0, need);
+      pick.forEach(n => used[lot].add(n));
+      plan.push({ id: l.id, lotNo: lot, date: l.date, gas: l.gas, company: l.company,
+                  need, pick, short: need - pick.length });
+    });
+
+    _prodRecoverPlan = plan;
+    const okList = plan.filter(p => p.pick.length);
+    const totCyl = okList.reduce((s,p) => s + p.pick.length, 0);
+    const totNeed = plan.reduce((s,p) => s + p.need, 0);
+
+    el.innerHTML = `
+      <div style="margin-bottom:8px;line-height:1.8">
+        용기번호가 비어 있는 생산 이력 <strong>${plan.length}건</strong> (용기 ${totNeed.toLocaleString()}개)<br>
+        <strong style="color:var(--accent)">복구 가능: ${okList.length}건 · 용기 ${totCyl.toLocaleString()}개</strong>
+        <span style="color:var(--text3)"> — 성적서·출고 이력에 남아 있는 번호입니다</span>
+      </div>
+      <div class="tbl-wrap" style="max-height:360px"><table>
+        <thead><tr><th>생산일</th><th>LOT</th><th>업체</th><th class="num">필요</th><th class="num">복구</th><th>용기번호</th></tr></thead>
+        <tbody>${plan.slice(0, 300).map(p => `<tr${p.pick.length ? '' : ' style="opacity:.45"'}>
+          <td style="font-family:var(--mono);font-size:11px">${p.date || ''}</td>
+          <td style="font-family:var(--mono);font-size:11px;color:var(--accent2)">${p.lotNo || ''}</td>
+          <td style="font-size:11px">${p.company || ''}</td>
+          <td class="num" style="font-family:var(--mono)">${p.need}</td>
+          <td class="num" style="font-family:var(--mono);color:${p.pick.length ? 'var(--accent)' : 'var(--warn)'}">${p.pick.length}</td>
+          <td style="font-family:var(--mono);font-size:11px;color:var(--text3)">
+            ${p.pick.slice(0,5).join(', ')}${p.pick.length > 5 ? ` 외 ${p.pick.length-5}개` : ''}
+            ${p.short > 0 ? `<span style="color:var(--warn)"> (${p.short}개 부족)</span>` : ''}
+          </td>
+        </tr>`).join('')}</tbody>
+      </table></div>
+      ${plan.length > 300 ? `<div style="font-size:11px;color:var(--text3);margin-top:4px">※ 화면에는 300건만 표시했습니다. 복구는 전체에 적용됩니다.</div>` : ''}
+      ${okList.length ? `
+      <div class="flex-gap" style="gap:8px;margin-top:12px">
+        <button class="btn btn-success" onclick="applyProdCylRecovery()">✅ 이 내용으로 복구 (${okList.length}건 · 용기 ${totCyl.toLocaleString()}개)</button>
+      </div>
+      <div style="font-size:11px;color:var(--text3);margin-top:6px;line-height:1.7">
+        ※ 같은 LOT 에 생산 이력이 여러 건이면 <strong>생산일 순서대로</strong> 나눠 배정합니다.<br>
+        ※ 실제와 다르면 <strong>🔎 LOT 저장 내용 확인</strong> 에서 건별로 고칠 수 있습니다.
+      </div>` : ''}`;
+  }, 30);
+}
+
+function applyProdCylRecovery() {
+  if (!_prodRecoverPlan) return;
+  const list = _prodRecoverPlan.filter(p => p.pick.length);
+  if (!list.length) { alert('복구할 수 있는 건이 없습니다.'); return; }
+  const totCyl = list.reduce((s,p) => s + p.pick.length, 0);
+
+  if (!confirm(
+    `생산 이력 ${list.length}건의 용기번호를 복구합니다.\n` +
+    `  복구되는 용기번호: ${totCyl.toLocaleString()}개\n\n` +
+    `성적서·출고 이력에 남아 있는 번호를 되돌립니다.\n` +
+    `기존에 들어있던 값은 덮어쓰지 않습니다.\n\n` +
+    `백업은 받으셨나요? 계속하시겠습니까?`
+  )) return;
+
+  let done = 0;
+  list.forEach(p => {
+    const l = logs.find(x => x.id === p.id);
+    if (!l) return;
+    l.containers = (l.containers || []).map((c, i) => {
+      const no = p.pick[i];
+      if (!no) return c;
+      return (c && typeof c === 'object')
+        ? { ...c, container: no }
+        : { no: i + 1, container: no, size: l.size, company: l.company, pAfter: null, note: '' };
+    });
+    done++;
+  });
+
+  if (window._invalidateCylCache) window._invalidateCylCache();
+  allowCylShrink();   // 복구는 개수가 늘어나므로 보호막 통과
+  save(STORE_KEY_LOG, logs);
+  scanProdCylRecovery();
+  alert(`✅ ${done}건 · 용기번호 ${totCyl.toLocaleString()}개를 복구했습니다.`);
 }
 
 // 이 PC 보관본에서 용기번호를 되살린다
