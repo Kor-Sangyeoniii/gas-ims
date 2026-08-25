@@ -182,30 +182,35 @@ window._pendingSave = window._pendingSave || {};
 //  어떤 경로로 저장하든, 용기번호가 줄어들면 저장을 막는다.
 //  (2026-08 사고: 압축 기능이 4~7월 용기번호를 통째로 지움)
 // ══════════════════════════════════════════════════════════════
-window._cylGuard = { lastCount: null, blocked: 0 };
+window._cylGuard = { lastCount: null, lastLogs: null, blocked: 0 };
 
 function _guardCylCount(key, val) {
   if (key !== 'gasims_log_v2' || !Array.isArray(val)) return true;
-  const now = _countCyls(val);
+  const now  = _countCyls(val);
   const prev = window._cylGuard.lastCount;
+  const prevLogs = window._cylGuard.lastLogs;
 
-  // 이전에 세어둔 값보다 크게 줄면 사고로 본다
-  if (prev != null && now < prev) {
+  // ⚠️ 조금 줄어드는 건 정상이다. (이력 수정·삭제, 용기 한두 개 조정 등)
+  //    막아야 하는 것은 "이력은 그대로인데 용기번호만 무더기로 사라지는" 경우뿐이다.
+  //    예전에는 1개만 줄어도 저장을 막아 정상 작업까지 안 되는 문제가 있었다.
+  if (prev != null && prevLogs != null && !window._cylGuard.allowShrink) {
     const lost = prev - now;
-    // 이력을 실제로 삭제한 경우는 정상이므로, 이력 건수도 함께 본다
-    const okToShrink = window._cylGuard.allowShrink;
-    if (!okToShrink && lost > 0) {
+    const logsDiff = prevLogs - val.length;
+    // 이력 건수는 거의 그대로인데(±5건) 용기번호만 30% 넘게 사라진 경우만 차단
+    const massLoss = lost > 0 && prev > 50 && (lost / prev) > 0.3 && logsDiff <= 5;
+    if (massLoss) {
       window._cylGuard.blocked++;
-      console.error('[용기번호 보호] 저장 차단 — 용기번호가', prev, '→', now, '(', lost, '개 감소)');
+      console.error('[용기번호 보호] 저장 차단 — 용기번호', prev, '→', now, `(${lost}개 감소)`);
       if (window.showSaveFailure) {
         window.showSaveFailure(key,
-          `용기번호 ${lost}개가 사라질 뻔해 저장을 막았습니다`,
-          '이력을 삭제하신 게 아니라면 새로고침 후 다시 시도해주세요. 데이터는 안전합니다.');
+          `용기번호 ${lost}개가 한꺼번에 사라질 뻔해 저장을 막았습니다`,
+          '새로고침 후 다시 시도해주세요. 데이터는 안전합니다.');
       }
       return false;
     }
   }
   window._cylGuard.lastCount = now;
+  window._cylGuard.lastLogs  = val.length;
   window._cylGuard.allowShrink = false;
   saveCylSnapshot(val);   // 용기번호를 이 PC에 따로 보관
   return true;
@@ -266,6 +271,10 @@ window.fsSave = async function(key, val) {
     }
     if (window._pendingSave) window._pendingSave[key] = false;
     if (window._localWriteAt) window._localWriteAt[key] = Date.now();
+    if (!allOk && window.showSaveFailure) {
+      window.showSaveFailure(key, '일부 월의 이력을 서버에 저장하지 못했습니다',
+        '입력한 내용은 이 PC에 있습니다. 다시 저장을 눌러주세요.');
+    }
     return allOk;
   }
 
