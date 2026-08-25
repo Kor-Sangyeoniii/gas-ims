@@ -3,6 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- 브라우저가 옛 파일을 계속 쓰지 않도록 캐시를 막는다 -->
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <title>가스 재고관리 시스템</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Nanum+Gothic:wght@400;700;800&family=JetBrains+Mono:wght@400;600&display=swap');
@@ -7644,6 +7648,9 @@ function saveProd() {
 
   if (!containers.length) { alert('용기번호를 1개 이상 입력해주세요.'); return; }
 
+  // 사용할 공병 (각인이 맞는 재고에서 차감) — 아래 재고 처리에서 쓰므로 미리 읽는다
+  const emptySrcId = document.getElementById('prodEmptySrc')?.value || '';
+
   // 농도 없는 혼합가스는 생산할 수 없다 (성적서에 농도가 빠지므로)
   if (isMixWithoutPct(gas)) {
     alert(
@@ -7731,7 +7738,6 @@ function saveProd() {
   // He 원재료 출처 (ISO Tank / 카트리지) + N2/Ar 탱크 ID
   const heSrc = document.getElementById('prodHeSrc')?.value || 'tank';
   const cylSrcMap = getProdCylSrcMap();
-  const emptySrcId = document.getElementById('prodEmptySrc')?.value || '';
   const selectedTankId = document.getElementById('prodHeTank')?.value || '';
 
   const consumption = calcProductionConsumption(gas, sizeL, fillBar, count);
